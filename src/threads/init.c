@@ -72,6 +72,8 @@ static void locate_block_device (enum block_type, const char *name);
 
 int pintos_init (void) NO_RETURN;
 
+static void kernel_shell(void);
+
 /** Pintos main entry point. */
 int
 pintos_init (void)
@@ -134,12 +136,66 @@ pintos_init (void)
     run_actions (argv);
   } else {
     // TODO: no command line passed to kernel. Run interactively 
+    kernel_shell();
   }
 
   /* Finish up. */
   shutdown ();
   thread_exit ();
 }
+
+#define KERNEL_SHELL_LINE_BUFFER 64  // in bytes.
+
+/** run the kernel-level shell */
+static void 
+kernel_shell() {
+  static char line_buf[KERNEL_SHELL_LINE_BUFFER];
+  int len = 0;
+
+  while (1) {
+    printf("PKUOS>");
+    bool bad_flag = 0;
+
+
+    // get a line
+    len = 0;
+    while (1) {
+      char c = input_getc();
+      putchar(c);
+      if (c == '\r') 
+        {
+          putchar('\n');
+          line_buf[len] = 0;
+          break;
+        } 
+      else 
+        {
+          if (len == KERNEL_SHELL_LINE_BUFFER) {
+            puts("\nKernel: Too long shell command.");
+            bad_flag = 1;
+            break;
+          }
+          line_buf[len++] = c;
+        }
+    }
+
+    if (bad_flag) continue;
+
+    static const  char * EXIT_STR = "exit";
+    static const  char * WHOAMI_STR = "whoami";
+
+    if (strcmp(EXIT_STR, line_buf) == 0) 
+        break;
+    else if (strcmp(WHOAMI_STR, line_buf) == 0)
+      {
+        puts("2100013022");
+      }
+    else
+      puts("invalid command");
+  }
+
+}
+
 
 /** Clear the "BSS", a segment that should be initialized to
    zeros.  It isn't actually stored on disk or zeroed by the
