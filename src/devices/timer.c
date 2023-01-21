@@ -7,6 +7,7 @@
 #include "threads/interrupt.h"
 #include "threads/synch.h"
 #include "threads/thread.h"
+#include <list.h>
   
 /** See [8254] for hardware details of the 8254 timer chip. */
 
@@ -24,6 +25,10 @@ static int64_t ticks;
    Initialized by timer_calibrate(). */
 static unsigned loops_per_tick;
 
+
+static struct list sleeping; 
+static struct lock sleep_lock;        /**< Protect sleeping_threads  */
+
 static intr_handler_func timer_interrupt;
 static bool too_many_loops (unsigned loops);
 static void busy_wait (int64_t loops);
@@ -37,6 +42,9 @@ timer_init (void)
 {
   pit_configure_channel (0, 2, TIMER_FREQ);
   intr_register_ext (0x20, timer_interrupt, "8254 Timer");
+
+  list_init(&sleeping);
+  lock_init(&sleep_lock);
 }
 
 /** Calibrates loops_per_tick, used to implement brief delays. */
@@ -92,8 +100,20 @@ timer_sleep (int64_t ticks)
   int64_t start = timer_ticks ();
 
   ASSERT (intr_get_level () == INTR_ON);
-  while (timer_elapsed (start) < ticks) 
-    thread_yield ();
+
+  struct thread * me = thread_current ();
+  me->wakeup_tick = start + ticks;
+
+  sema_init(&me->sleep_sema, 0);          // The order matters.
+                                          // This cant be init after pushing to the list.
+
+  lock_acquire (&sleep_lock);
+  list_push_back (&sleeping, &me->sleep_elem);  // From now on the semaphore may be set up.
+  lock_release (&sleep_lock);
+  
+  // Wait the timer to set this semephore up
+
+  sema_down(&me->sleep_sema);
 }
 
 /** Sleeps for approximately MS milliseconds.  Interrupts must be
@@ -171,6 +191,24 @@ static void
 timer_interrupt (struct intr_frame *args UNUSED)
 {
   ticks++;
+
+  // Extern interrupt could only be handled with interrupt off. 
+  // So we dont need to synchronize below.
+
+  struct list_elem *e;
+
+  for (e = list_begin (&sleeping); e != list_end (&sleeping); )
+    {
+      struct thread *t = list_entry (e, struct thread, sleep_elem);
+      if (t->wakeup_tick <= ticks) {
+        sema_up(&t->sleep_sema);
+
+        e = list_remove(e);
+      } else {
+        e = list_next(e);
+      }
+    }
+
   thread_tick ();
 }
 

@@ -4,6 +4,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include "synch.h"
 
 /** States in a thread's life cycle. */
 enum thread_status
@@ -88,6 +89,11 @@ struct thread
     char name[16];                      /**< Name (for debugging purposes). */
     uint8_t *stack;                     /**< Saved stack pointer. */
     int priority;                       /**< Priority. */
+
+    int64_t wakeup_tick;                /**< Only if this thread is now sleeping */
+    struct semaphore sleep_sema;        /**< The semaphore used inside timer_sleep () */
+    struct list_elem sleep_elem;
+
     struct list_elem allelem;           /**< List element for all threads list. */
 
     /* Shared between thread.c and synch.c. */
