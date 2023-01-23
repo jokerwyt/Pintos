@@ -27,7 +27,6 @@ static unsigned loops_per_tick;
 
 
 static struct list sleeping; 
-static struct lock sleep_lock;        /**< Protect sleeping_threads  */
 
 static intr_handler_func timer_interrupt;
 static bool too_many_loops (unsigned loops);
@@ -40,11 +39,10 @@ static void real_time_delay (int64_t num, int32_t denom);
 void
 timer_init (void) 
 {
+  list_init(&sleeping);
+   
   pit_configure_channel (0, 2, TIMER_FREQ);
   intr_register_ext (0x20, timer_interrupt, "8254 Timer");
-
-  list_init(&sleeping);
-  lock_init(&sleep_lock);
 }
 
 /** Calibrates loops_per_tick, used to implement brief delays. */
@@ -102,17 +100,18 @@ timer_sleep (int64_t ticks)
   ASSERT (intr_get_level () == INTR_ON);
 
   struct thread * me = thread_current ();
+
+  // Now the timer interrupt wont access them, until we push it back to `sleeping`.
   me->wakeup_tick = start + ticks;
+  sema_init(&me->sleep_sema, 0);
 
-  sema_init(&me->sleep_sema, 0);          // The order matters.
-                                          // This cant be init after pushing to the list.
+  intr_disable ();
+  {
+    list_push_back (&sleeping, &me->sleep_elem);  
+  }
+  intr_enable ();
 
-  lock_acquire (&sleep_lock);
-  list_push_back (&sleeping, &me->sleep_elem);  // From now on the semaphore may be set up.
-  lock_release (&sleep_lock);
-  
   // Wait the timer to set this semephore up
-
   sema_down(&me->sleep_sema);
 }
 
@@ -194,6 +193,8 @@ timer_interrupt (struct intr_frame *args UNUSED)
 
   // Extern interrupt could only be handled with interrupt off. 
   // So we dont need to synchronize below.
+  // Be careful: we shouldn't access unprotected global variable (i.e. these 
+  // may be modified with timer interrupt ON).
 
   struct list_elem *e;
 

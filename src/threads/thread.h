@@ -90,6 +90,8 @@ struct thread
     uint8_t *stack;                     /**< Saved stack pointer. */
     int priority;                       /**< Priority. */
 
+    // The following 3 variables are shared with timer interrupt handler.
+    // Disabling interrupts if necessary.
     int64_t wakeup_tick;                /**< Only if this thread is now sleeping */
     struct semaphore sleep_sema;        /**< The semaphore used inside timer_sleep () */
     struct list_elem sleep_elem;
