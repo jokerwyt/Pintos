@@ -341,6 +341,7 @@ cond_signal (struct condition *cond, struct lock *lock UNUSED)
             }
         }
 
+      list_remove (&prior->elem);
       sema_up (&prior->semaphore);
     }
 }
