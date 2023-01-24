@@ -109,6 +109,13 @@ signal (struct intq *q UNUSED, struct thread **waiter)
   if (*waiter != NULL) 
     {
       thread_unblock (*waiter);
+
+      // === The priority scheduling policy ===
+      if ((*waiter)->priority > thread_current ()->priority) 
+        {
+          thread_yield_as_soon_as_possible ();
+        }
+
       *waiter = NULL;
     }
 }

@@ -200,6 +200,8 @@ thread_create (const char *name, int priority,
 
   /* Add to run queue. */
   thread_unblock (t);
+  if (priority > thread_current ()->priority)
+    thread_yield_as_soon_as_possible ();
 
   return tid;
 }
@@ -250,9 +252,7 @@ thread_block (void)
    This is an error if T is not blocked.  (Use thread_yield() to
    make the running thread ready.)
 
-
-   IMPORTANT: If the priority schedule policy is not applied,
-   this function does not preempt the running thread.  This can
+   This function does not preempt the running thread.  This can
    be important: if the caller had disabled interrupts itself,
    it may expect that it can atomically unblock a thread and
    update other data. */
@@ -260,7 +260,6 @@ void
 thread_unblock (struct thread *t) 
 {
   enum intr_level old_level;
-  struct thread * cur = thread_current ();
 
   ASSERT (is_thread (t));
 
@@ -268,20 +267,6 @@ thread_unblock (struct thread *t)
   ASSERT (t->status == THREAD_BLOCKED);
   list_push_back (&ready_list, &t->elem);
   t->status = THREAD_READY;
-
-  // === The priority scheduling policy ===
-  // When a thread is added to the ready list that has a higher priority 
-  // than the currently running thread, the current thread should immediately 
-  // yield the processor to the new thread. 
-
-  if (t->priority > cur->priority) 
-    {
-      if (intr_context ())
-          intr_yield_on_return ();
-      else
-          thread_yield ();
-    } 
-
   intr_set_level (old_level);
 }
 
@@ -357,6 +342,18 @@ thread_yield (void)
   intr_set_level (old_level);
 }
 
+/** Yield immediately if not in interrupt context, or yield when interrupt handler 
+ * finish.
+*/
+void 
+thread_yield_as_soon_as_possible (void)
+{
+  if (intr_context ())
+      intr_yield_on_return ();
+  else
+      thread_yield ();
+}
+
 /** Invoke function 'func' on all threads, passing along 'aux'.
    This function must be called with interrupts off. */
 void
@@ -383,15 +380,11 @@ thread_set_priority (int new_priority)
   struct thread * cur = thread_current ();
   int old_priority = cur->priority;
 
-  cur->priority = new_priority;
+  cur->origin_priority = new_priority;
+  thread_update_priority (cur);
 
-  if (new_priority < old_priority) 
-    {
-      if (intr_context ())
-        intr_yield_on_return ();
-      else
-        thread_yield ();
-    }
+  if (cur->priority < old_priority) 
+      thread_yield_as_soon_as_possible ();
 }
 
 /** Returns the current thread's priority. */
@@ -517,9 +510,11 @@ init_thread (struct thread *t, const char *name, int priority)
   t->status = THREAD_BLOCKED;
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
-  t->priority = priority;
+  t->origin_priority = t->priority = priority;
+  t->waiting_lock = NULL;
   t->magic = THREAD_MAGIC;
-
+  list_init(&t->locks_held);
+  
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);
   intr_set_level (old_level);
@@ -637,6 +632,61 @@ allocate_tid (void)
 
   return tid;
 }
+
+bool 
+thread_priority_less (const struct list_elem * a, 
+                      const struct list_elem * b,
+                      void *aux UNUSED)
+{
+  return list_entry (a, struct thread, elem)->priority
+    < list_entry (b, struct thread, elem)->priority;
+}
+
+/** Updating a thread's priority, considering donation */
+void thread_update_priority (struct thread * t) 
+{
+  enum intr_level old_level;
+
+  old_level = intr_disable ();
+  // By convenience, we just disable interrupts to prevent race condition.
+  {
+    // We go through all locks held and their waiters to check donation.
+    // Nest donation is supported.
+
+    struct list_elem *e_lock, *e_waiter;
+    int new_priority = t->origin_priority;
+    int old_priority = t->priority;
+    
+    for (e_lock = list_begin (&t->locks_held);
+          e_lock != list_end (&t->locks_held);
+          e_lock = list_next (e_lock))
+      {
+        struct lock * L = list_entry (e_lock, struct lock, elem);
+        for (e_waiter = list_begin (&L->semaphore.waiters);
+             e_waiter != list_end (&L->semaphore.waiters);
+             e_waiter = list_next(e_waiter))
+          {
+            struct thread * t = list_entry (e_waiter, struct thread, elem);
+
+            if (new_priority < t->priority)
+              new_priority = t->priority;
+          }
+      }
+    
+    t->priority = new_priority;
+
+    if (t == thread_current ())
+      {
+        if (new_priority < old_priority)
+          thread_yield_as_soon_as_possible ();
+      } 
+    else
+        if (new_priority > thread_current ()->priority)
+          thread_yield_as_soon_as_possible ();
+  }
+  intr_set_level (old_level);
+}
+
 
 /** Offset of `stack' member within `struct thread'.
    Used by switch.S, which can't figure it out on its own. */

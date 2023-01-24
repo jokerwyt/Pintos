@@ -109,6 +109,7 @@ void
 sema_up (struct semaphore *sema) 
 {
   enum intr_level old_level;
+  struct thread * prior;
 
   ASSERT (sema != NULL);
 
@@ -116,8 +117,13 @@ sema_up (struct semaphore *sema)
   sema->value++;
   if (!list_empty (&sema->waiters)) 
     {
-      struct thread * pri = thread_prior (&sema->waiters);
-      thread_unblock (pri);
+      prior = thread_prior (&sema->waiters);
+      thread_unblock (prior);  
+      
+      if (prior->priority > thread_current ()->priority) 
+        {
+          thread_yield_as_soon_as_possible ();
+        }
     }
   intr_set_level (old_level);
 }
@@ -194,12 +200,43 @@ lock_init (struct lock *lock)
 void
 lock_acquire (struct lock *lock)
 {
+  enum intr_level old_level;
+
   ASSERT (lock != NULL);
   ASSERT (!intr_context ());
   ASSERT (!lock_held_by_current_thread (lock));
+  
+  // Priority donation
 
-  sema_down (&lock->semaphore);
+  old_level = intr_disable ();
+  {
+    thread_current ()->waiting_lock = lock;
+
+    // boost other threads
+    struct thread * t = thread_current ();
+
+    int depth = 0;
+    for (; t != NULL; t = t->waiting_lock->holder)
+      {
+        t->priority = 
+          t->priority > thread_current ()->priority ?
+            t->priority : thread_current ()->priority;
+        if (t->waiting_lock == NULL)
+          break;
+        if (++depth >= DEADLOCK_DEPTH)
+          PANIC ("Deadlock detected!");
+      }
+
+    sema_down (&lock->semaphore);
+    thread_current ()->waiting_lock = NULL;
+  }
+  intr_set_level (old_level);
+
+  
   lock->holder = thread_current ();
+  list_push_back (&lock->holder->locks_held, &lock->elem); 
+
+  thread_update_priority (lock->holder);
 }
 
 /** Tries to acquires LOCK and returns true if successful or false
@@ -218,7 +255,10 @@ lock_try_acquire (struct lock *lock)
 
   success = sema_try_down (&lock->semaphore);
   if (success)
+  {
     lock->holder = thread_current ();
+    list_push_back (&lock->holder->locks_held, &lock->elem);
+  }
   return success;
 }
 
@@ -234,7 +274,13 @@ lock_release (struct lock *lock)
   ASSERT (lock_held_by_current_thread (lock));
 
   lock->holder = NULL;
-  sema_up (&lock->semaphore);
+  list_remove (&lock->elem);    // remove the lock from current's `locks_held`
+  sema_up (&lock->semaphore);   // TODO: sema up with boost is better
+  
+  // Priority donation: lower this thread's priority,
+  // after succesfully pick the lock's successor (and TODO: hand over boost)
+
+  thread_update_priority (thread_current ());
 }
 
 /** Returns true if the current thread holds LOCK, false

@@ -88,7 +88,8 @@ struct thread
     enum thread_status status;          /**< Thread state. */
     char name[16];                      /**< Name (for debugging purposes). */
     uint8_t *stack;                     /**< Saved stack pointer. */
-    int priority;                       /**< Priority. */
+    int priority;                       /**< Priority boosted by locks held */
+    int origin_priority;                /**< Original priority. */
 
     // The following 3 variables are shared with timer interrupt handler.
     // Disabling interrupts if necessary.
@@ -100,6 +101,14 @@ struct thread
 
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /**< List element. */
+
+    /* Two threads share the ownership of this list:
+      1. The thread itself, 
+      2. or the thread who blocks this thread directly, or indirectly (nested block).
+
+      They won't lead to race conditions. */
+    struct list locks_held;             /**< All locks it holds currently */
+    struct lock *waiting_lock;          /**< The lock this thread is waiting (if any) */
 
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
@@ -134,6 +143,7 @@ const char *thread_name (void);
 
 void thread_exit (void) NO_RETURN;
 void thread_yield (void);
+void thread_yield_as_soon_as_possible (void);
 
 /** Performs some operation on thread t, given auxiliary data AUX. */
 typedef void thread_action_func (struct thread *t, void *aux);
@@ -146,5 +156,11 @@ int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
+
+bool thread_priority_less (const struct list_elem * a, 
+                           const struct list_elem * b,
+                           void *aux);
+
+void thread_update_priority (struct thread * t);
 
 #endif /**< threads/thread.h */

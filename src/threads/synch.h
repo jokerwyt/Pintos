@@ -4,6 +4,8 @@
 #include <list.h>
 #include <stdbool.h>
 
+#define DEADLOCK_DEPTH 10
+
 /** A counting semaphore. */
 struct semaphore 
   {
@@ -22,6 +24,7 @@ struct lock
   {
     struct thread *holder;      /**< Thread holding lock (for debugging). */
     struct semaphore semaphore; /**< Binary semaphore controlling access. */
+    struct list_elem elem;      /**< Used by holder's list `locks_held` */
   };
 
 void lock_init (struct lock *);
