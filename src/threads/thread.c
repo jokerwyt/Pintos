@@ -374,7 +374,9 @@ thread_foreach (thread_action_func *func, void *aux)
     }
 }
 
-/** Sets the current thread's priority to NEW_PRIORITY. */
+/** Sets the current thread's priority to NEW_PRIORITY. 
+ * Lowering the priority makes the current thread yield the cpu immediately.
+*/
 void
 thread_set_priority (int new_priority) 
 {
