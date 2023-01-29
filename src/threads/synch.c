@@ -285,7 +285,7 @@ lock_release (struct lock *lock)
     sema_up (&lock->semaphore);   // The thread with higest priority will be unblocked.
 
     // This thread's priority may drop, due to some threads are no longer waiting it.
-    thread_update_priority (thread_current ());
+    thread_update_priority (thread_current (), NULL);
   }
   intr_set_level (old_level);
 }

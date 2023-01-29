@@ -5,6 +5,7 @@
 #include <list.h>
 #include <stdint.h>
 #include "synch.h"
+#include <fixedpoint.h>
 
 /** States in a thread's life cycle. */
 enum thread_status
@@ -88,6 +89,7 @@ struct thread
     enum thread_status status;          /**< Thread state. */
     char name[16];                      /**< Name (for debugging purposes). */
     uint8_t *stack;                     /**< Saved stack pointer. */
+
     int priority;                       /**< Priority boosted by locks held */
     int origin_priority;                /**< Original priority. */
 
@@ -106,6 +108,10 @@ struct thread
     struct list locks_held;             /**< All locks it holds currently */
     struct lock *waiting_lock;          /**< The lock this thread is waiting (if any) */
 
+    /** MLFQ used */
+    fixedpoint recent_cpu;
+    int nice;
+    
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /**< Page directory. */
@@ -119,6 +125,7 @@ struct thread
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
 extern bool thread_mlfqs;
+extern fixedpoint load_avg;
 
 void thread_init (void);
 void thread_start (void);
@@ -153,10 +160,12 @@ void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
 
+int thread_ready_count (void);
+
 bool thread_priority_less (const struct list_elem * a, 
                            const struct list_elem * b,
                            void *aux);
 
-void thread_update_priority (struct thread * t);
+void thread_update_priority (struct thread * t, void *aux);
 
 #endif /**< threads/thread.h */

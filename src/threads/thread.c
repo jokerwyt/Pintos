@@ -37,6 +37,9 @@ static struct thread *initial_thread;
 /** Lock used by allocate_tid(). */
 static struct lock tid_lock;
 
+/** load_avg, used by MLFQ, updated by timer interrupt handler */
+fixedpoint load_avg;
+
 /** Stack frame for kernel_thread(). */
 struct kernel_thread_frame 
   {
@@ -93,9 +96,15 @@ thread_init (void)
   list_init (&ready_list);
   list_init (&all_list);
 
+  load_avg = intfp(0);
+
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
   init_thread (initial_thread, "main", PRI_DEFAULT);
+  
+  initial_thread->recent_cpu = intfp (0);
+  initial_thread->nice = 0;
+
   initial_thread->status = THREAD_RUNNING;
   initial_thread->tid = allocate_tid ();
 }
@@ -198,9 +207,18 @@ thread_create (const char *name, int priority,
   sf->eip = switch_entry;
   sf->ebp = 0;
 
+ 
+  if (thread_mlfqs)
+  {
+    t->recent_cpu = thread_current ()->recent_cpu;
+    t->nice = thread_current ()->nice;
+    thread_update_priority (t, NULL);
+  }
+
+
   /* Add to run queue. */
   thread_unblock (t);
-  if (priority > thread_current ()->priority)
+  if (t->priority > thread_current ()->priority)
     thread_yield_as_soon_as_possible ();
 
   return tid;
@@ -377,13 +395,15 @@ thread_foreach (thread_action_func *func, void *aux)
 void
 thread_set_priority (int new_priority) 
 {
+  if (thread_mlfqs) return;
+  
   struct thread * cur = thread_current ();
 
   enum intr_level old_level = intr_disable ();
   {
     int old_priority = cur->priority;
     cur->origin_priority = new_priority;
-    thread_update_priority (cur);
+    thread_update_priority (cur, NULL);
 
     if (cur->priority < old_priority) 
         thread_yield_as_soon_as_possible ();
@@ -402,31 +422,35 @@ thread_get_priority (void)
 void
 thread_set_nice (int nice UNUSED) 
 {
-  /* Not yet implemented. */
+  enum intr_level old_level = intr_disable ();
+  {
+    thread_current ()->nice = nice;
+    thread_update_priority (thread_current (), NULL);
+  }
+  intr_set_level (old_level);
 }
 
 /** Returns the current thread's nice value. */
 int
 thread_get_nice (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  return thread_current ()->nice;
 }
 
 /** Returns 100 times the system load average. */
 int
 thread_get_load_avg (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  fixedpoint ret = load_avg;
+  return roundfp (mult_n (ret, 100));
 }
 
 /** Returns 100 times the current thread's recent_cpu value. */
 int
 thread_get_recent_cpu (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  fixedpoint ret = thread_current ()->recent_cpu;
+  return roundfp (mult_n (ret, 100));
 }
 
 /** Idle thread.  Executes when no other thread is ready to run.
@@ -646,10 +670,13 @@ thread_priority_less (const struct list_elem * a,
     < list_entry (b, struct thread, elem)->priority;
 }
 
-/** Updating a thread's priority, from the locks it's now holding 
+/** Updating a thread's priority, 
+ * if MLFQ off, from the locks it's now holding;
+ * if MLFQ on, from the fomula provided.
+ * 
  * It may give the control out instanly, if the priority is lowered.
 */
-void thread_update_priority (struct thread * t) 
+void thread_update_priority (struct thread * t, void * aux UNUSED) 
 {
   enum intr_level old_level;
 
@@ -657,41 +684,64 @@ void thread_update_priority (struct thread * t)
   // Timer interrupt handler use priority to wake a thread up.
   // So disabling interrupt is a must.
   {
-    // Go through all locks and their waiters.
-    // Nest donation is supported.
-
-    struct list_elem *e_lock, *e_waiter;
-    int new_priority = t->origin_priority;
     int old_priority = t->priority;
-    
-    for (e_lock = list_begin (&t->locks_held);
-          e_lock != list_end (&t->locks_held);
-          e_lock = list_next (e_lock))
+    if (thread_mlfqs)
       {
-        struct lock * L = list_entry (e_lock, struct lock, elem);
-        for (e_waiter = list_begin (&L->semaphore.waiters);
-             e_waiter != list_end (&L->semaphore.waiters);
-             e_waiter = list_next(e_waiter))
-          {
-            struct thread * t = list_entry (e_waiter, struct thread, elem);
-
-            if (new_priority < t->priority)
-              new_priority = t->priority;
-          }
+        // The fomula: PRI_MAX - recent_cpu / 4 - 2 * nice
+        // Dirty hack to damn -O0
+        fixedpoint tmp = ((PRI_MAX - t->nice * 2) << 14) - div_n (t->recent_cpu, 4);
+        t->priority = roundfp(tmp);
+        if (t->priority < PRI_MIN) t->priority = PRI_MIN;
+        else 
+        if (t->priority > PRI_MAX) t->priority = PRI_MAX;
       }
-    
-    t->priority = new_priority;
+    else
+      {
+        // Go through all locks and their waiters.
+        // Nest donation is supported.
 
+        struct list_elem *e_lock, *e_waiter;
+        int new_priority = t->origin_priority;
+        
+        for (e_lock = list_begin (&t->locks_held);
+              e_lock != list_end (&t->locks_held);
+              e_lock = list_next (e_lock))
+          {
+            struct lock * L = list_entry (e_lock, struct lock, elem);
+            for (e_waiter = list_begin (&L->semaphore.waiters);
+                e_waiter != list_end (&L->semaphore.waiters);
+                e_waiter = list_next(e_waiter))
+              {
+                struct thread * t = list_entry (e_waiter, struct thread, elem);
+
+                if (new_priority < t->priority)
+                  new_priority = t->priority;
+              }
+          }
+        
+        t->priority = new_priority;
+      }
     if (t == thread_current ())
       {
-        if (new_priority < old_priority)
+        if (t->priority < old_priority)
           thread_yield_as_soon_as_possible ();
       } 
     else
-        if (new_priority > thread_current ()->priority)
+        if (t->priority > thread_current ()->priority)
           thread_yield_as_soon_as_possible ();
   }
   intr_set_level (old_level);
+}
+
+int thread_ready_count (void)
+{
+  int ret = 0;
+  enum intr_level old_level = intr_disable ();
+  {
+    ret = list_size (&ready_list);
+  }
+  intr_set_level (old_level);
+  return ret + (thread_current () == idle_thread ? 0 : 1);
 }
 
 

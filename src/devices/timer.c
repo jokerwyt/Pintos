@@ -90,6 +90,15 @@ timer_elapsed (int64_t then)
   return timer_ticks () - then;
 }
 
+
+static bool wakeup_time_earlier(const struct list_elem *a,
+                             const struct list_elem *b,
+                             void *aux UNUSED)
+{
+  return list_entry (a, struct thread, sleep_elem)->wakeup_tick 
+    <   list_entry (b, struct thread, sleep_elem)->wakeup_tick;
+}
+
 /** Sleeps for approximately TICKS timer ticks.  Interrupts must
    be turned on. */
 void
@@ -107,7 +116,7 @@ timer_sleep (int64_t ticks)
 
   intr_disable ();
   {
-    list_push_back (&sleeping, &me->sleep_elem);  
+    list_insert_ordered (&sleeping, &me->sleep_elem, wakeup_time_earlier, NULL);  
   }
   intr_enable ();
 
@@ -185,6 +194,16 @@ timer_print_stats (void)
   printf ("Timer: %"PRId64" ticks\n", timer_ticks ());
 }
 
+
+static void recalc_recent_cpu (struct thread * t, void * aux UNUSED)
+{
+  // ASSERT (intr_get_level () == INTR_OFF);
+  fixedpoint tmp = mult_n (load_avg, 2);
+  fixedpoint coe = div (tmp, add_n (tmp, 1));
+
+  t->recent_cpu = add_n (mult (coe, t->recent_cpu), t->nice);
+}
+
 /** Timer interrupt handler. */
 static void
 timer_interrupt (struct intr_frame *args UNUSED)
@@ -196,19 +215,40 @@ timer_interrupt (struct intr_frame *args UNUSED)
   // Be careful: we shouldn't access unprotected global variable (i.e. these 
   // may be modified with timer interrupt ON).
 
-  struct list_elem *e;
-
-  for (e = list_begin (&sleeping); e != list_end (&sleeping); )
+  struct list_elem *e = list_begin (&sleeping);
+  while (e != &sleeping.tail)
     {
       struct thread *t = list_entry (e, struct thread, sleep_elem);
       if (t->wakeup_tick <= ticks) {
         sema_up(&t->sleep_sema);
-
         e = list_remove(e);
-      } else {
-        e = list_next(e);
-      }
+      } else break;
     }
+
+
+  if (thread_mlfqs)
+  {
+    thread_current ()->recent_cpu += intfp(1);
+
+    if (ticks % TIMER_FREQ == 0)
+    {
+      // update load_avg per second.
+      int ready_count = thread_ready_count ();
+
+      // The fomula: load_avg = (59/60) * load_avg + ready_count / 60
+      load_avg = 
+          mult (div (intfp (59), intfp (60)), load_avg)
+          + div_n (intfp (ready_count), 60);
+
+      // recalculate recent_cpu
+      thread_foreach (recalc_recent_cpu, NULL);
+    }
+
+    if (ticks % 4 == 0)
+    {
+      thread_foreach (thread_update_priority, NULL);
+    }
+  }
 
   thread_tick ();
 }
