@@ -102,11 +102,7 @@ struct thread
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /**< List element. */
 
-    /* Two threads share the ownership of this list:
-      1. The thread itself, 
-      2. or the thread who blocks this thread directly, or indirectly (nested block).
-
-      They won't lead to race conditions. */
+    /** The lock waiting tree */
     struct list locks_held;             /**< All locks it holds currently */
     struct lock *waiting_lock;          /**< The lock this thread is waiting (if any) */
 

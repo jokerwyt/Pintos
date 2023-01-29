@@ -378,13 +378,17 @@ void
 thread_set_priority (int new_priority) 
 {
   struct thread * cur = thread_current ();
-  int old_priority = cur->priority;
 
-  cur->origin_priority = new_priority;
-  thread_update_priority (cur);
+  enum intr_level old_level = intr_disable ();
+  {
+    int old_priority = cur->priority;
+    cur->origin_priority = new_priority;
+    thread_update_priority (cur);
 
-  if (cur->priority < old_priority) 
-      thread_yield_as_soon_as_possible ();
+    if (cur->priority < old_priority) 
+        thread_yield_as_soon_as_possible ();
+  }
+  intr_set_level (old_level);
 }
 
 /** Returns the current thread's priority. */
@@ -642,15 +646,18 @@ thread_priority_less (const struct list_elem * a,
     < list_entry (b, struct thread, elem)->priority;
 }
 
-/** Updating a thread's priority, considering donation */
+/** Updating a thread's priority, from the locks it's now holding 
+ * It may give the control out instanly, if the priority is lowered.
+*/
 void thread_update_priority (struct thread * t) 
 {
   enum intr_level old_level;
 
   old_level = intr_disable ();
-  // By convenience, we just disable interrupts to prevent race condition.
+  // Timer interrupt handler use priority to wake a thread up.
+  // So disabling interrupt is a must.
   {
-    // We go through all locks held and their waiters to check donation.
+    // Go through all locks and their waiters.
     // Nest donation is supported.
 
     struct list_elem *e_lock, *e_waiter;

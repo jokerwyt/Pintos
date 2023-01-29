@@ -4,7 +4,7 @@
 #include <list.h>
 #include <stdbool.h>
 
-#define DEADLOCK_DEPTH 10
+#define DEADLOCK_DEPTH 1000
 
 /** A counting semaphore. */
 struct semaphore 
