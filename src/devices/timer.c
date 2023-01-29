@@ -197,7 +197,6 @@ timer_print_stats (void)
 
 static void recalc_recent_cpu (struct thread * t, void * aux UNUSED)
 {
-  // ASSERT (intr_get_level () == INTR_OFF);
   fixedpoint tmp = mult_n (load_avg, 2);
   fixedpoint coe = div (tmp, add_n (tmp, 1));
 
