@@ -11,6 +11,7 @@
 #include "threads/switch.h"
 #include "threads/synch.h"
 #include "threads/vaddr.h"
+#include "userprog/syscall.h"
 #ifdef USERPROG
 #include "userprog/process.h"
 #endif
@@ -468,7 +469,7 @@ init_thread (struct thread *t, const char *name, int priority)
   t->priority = priority;
   t->magic = THREAD_MAGIC;
   t->exit_info = NULL;
-  t->next_fd = 2;
+  t->next_fd = MIN_FD;
   list_init (&t->opening_files);
   list_init (&t->children_info);
 
