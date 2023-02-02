@@ -59,6 +59,9 @@ static unsigned thread_ticks;   /**< # of timer ticks since last yield. */
    Controlled by kernel command-line option "-o mlfqs". */
 bool thread_mlfqs;
 
+/* The lock is used to make filesystem code mutex */
+struct lock fslock;
+
 static void kernel_thread (thread_func *, void *aux);
 
 static void idle (void *aux UNUSED);
@@ -90,6 +93,7 @@ thread_init (void)
   ASSERT (intr_get_level () == INTR_OFF);
 
   lock_init (&tid_lock);
+  lock_init (&fslock);
   list_init (&ready_list);
   list_init (&all_list);
 
@@ -463,6 +467,10 @@ init_thread (struct thread *t, const char *name, int priority)
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
   t->magic = THREAD_MAGIC;
+  t->exit_info = NULL;
+  t->next_fd = 2;
+  list_init (&t->opening_files);
+  list_init (&t->children_info);
 
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);

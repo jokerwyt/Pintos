@@ -4,6 +4,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include "synch.h"
 
 /** States in a thread's life cycle. */
 enum thread_status
@@ -19,10 +20,70 @@ enum thread_status
 typedef int tid_t;
 #define TID_ERROR ((tid_t) -1)          /**< Error value for tid_t. */
 
+/**
+ * Shared by the parent and the child. 
+ * The last one who exits should free the resource.
+ * 
+ * Malloc and initialized at process_execute (),
+ * Set exit_value at exit_handler ();
+ * Free at process_exit ();
+ * 
+ * When the parent waits the child:
+ * 1. acquire the mutex
+ * 2. until child_exited, do cond_wait ()
+ * 3. get the value
+ * 4. free resource
+ * 
+ * When the parent exit without wait:
+ * 1. acquire the mutex
+ * 2. see child_exited
+ * 3. if true, directly free the resource
+ * 4. if false setup parent_exited
+ * 5. release the mutex
+ * 
+ * When the child exits:
+ * 1. acquire the mutex
+ * 2. see parent_exited
+ * 3. if true, directly free the resource
+ * 4. if false, setup exit_value,
+ * 5. and cond_signal ()
+ * 6. release the mutex.
+ */
+struct exit_status
+  {
+    /* Used to notify the result of loading */
+    struct semaphore loaded; // Up after load in start_process, down in process_exec.
+    bool load_success;       // Be set before `loaded` up, 
+                             // and then be read from process_exec
+    
+    struct lock mutex;      // mutex to protect the following shared data
+    struct condition cond;  // cond to notify parent when child exits.
+
+    /* shared between the parent and child */
+    int exit_value;
+    bool child_exited;
+    bool parent_exited;    
+    bool active_exited; // the child thread call exit (), 
+                        // rather than terminated by kernel
+
+
+    /* only accessed by parent */
+    struct list_elem elem;
+    tid_t child_id;
+  };
+
 /** Thread priorities. */
 #define PRI_MIN 0                       /**< Lowest priority. */
 #define PRI_DEFAULT 31                  /**< Default priority. */
 #define PRI_MAX 63                      /**< Highest priority. */
+
+struct proc_file
+{
+  struct file * file;
+  int fd;
+
+  struct list_elem elem;
+};
 
 /** A kernel thread or user process.
 
@@ -97,6 +158,10 @@ struct thread
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /**< Page directory. */
 #endif
+    struct exit_status *exit_info;
+    struct list children_info;
+    struct list opening_files;
+    int next_fd;
 
     /* Owned by thread.c. */
     unsigned magic;                     /**< Detects stack overflow. */
@@ -106,6 +171,8 @@ struct thread
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
 extern bool thread_mlfqs;
+
+extern struct lock fslock;
 
 void thread_init (void);
 void thread_start (void);

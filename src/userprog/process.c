@@ -17,6 +17,7 @@
 #include "threads/palloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "threads/malloc.h"
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
@@ -31,6 +32,12 @@ process_execute (const char *file_name)
   char *fn_copy;
   tid_t tid;
 
+  if (strlen (file_name) + 1 + sizeof(uint32_t) > PGSIZE)
+    {
+      // Too long to contain both file_name and the exit_status pointer
+      return TID_ERROR;
+    }
+
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
   fn_copy = palloc_get_page (0);
@@ -38,19 +45,137 @@ process_execute (const char *file_name)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
 
+  // Put the exit_status pointer at the end of the page.
+  uint32_t * p_page_tail = (uint32_t *) (fn_copy + PGSIZE - sizeof(uint32_t));
+  struct exit_status * es = malloc (sizeof (struct exit_status));
+  if (es == NULL)
+    {
+      palloc_free_page (fn_copy); 
+      return TID_ERROR;
+    }
+  *p_page_tail = (uint32_t) es;
+
+  // Initialize the child's exit_status.
+  sema_init (&es->loaded, 0);
+  cond_init (&es->cond);
+  lock_init (&es->mutex);
+  es->active_exited = es->parent_exited = es->child_exited = 0;
+
   /* Create a new thread to execute FILE_NAME. */
+  // Give out the ownership of the page if the new thread actually runs,
+  // Notice: loading successfully is unnecessary for the ownership transfer.
   tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+
   if (tid == TID_ERROR)
-    palloc_free_page (fn_copy); 
+    {
+      // Error occured before a new thread actually runs
+      palloc_free_page (fn_copy);
+      free (es);
+      return TID_ERROR;
+    }
+
+  // These are only needed in the parent's process_wait () and process_exit (),
+  // So delay its intialization is ok.
+  es->child_id = tid;
+  list_push_back (&thread_current ()->children_info, &es->elem);
+
+  // See the loading result
+  sema_down (&es->loaded);
+  if (!es->load_success)
+    {
+      // The child should thread_exit instantly.
+      int state = process_wait (tid);
+
+      ASSERT (state == -1);
+
+      return -1;
+    }
+
   return tid;
 }
 
-/** A thread function that loads a user process and starts it
-   running. */
+
+/*  place _start(int argc, char ** argv) args at vaddr esp (i.e. start with esp + 1)
+    and set esp to the new stack pointer.
+
+
+    < 4Bytes >
+    |--------|
+    |--------|
+    |--------| <- argv_end is the step-4 round down of the first character of args.
+    |   0    | <- argv[argc]
+    |        | <- argv[argc - 1], the address of the rightmost argument.
+    ..........
+    |        | <- argv[0], i.e. argv_begin
+    |        | <- address of argv[0]
+    |        | <- argc
+    |        | <- a fake return address
+*/
+static void 
+place__start_args (void ** esp, char * cmd)
+{
+  char * args_begin = *esp;
+
+  args_begin -= strlen(cmd) + 1;      // including a null character.
+  strlcpy (args_begin, cmd, PGSIZE); 
+
+  uint32_t * argv_end  = (uint32_t *) ROUND_DOWN((uint32_t) args_begin, 4);
+  uint32_t * argv_begin = argv_end;
+
+  argv_begin --;
+  * argv_begin = 0;
+
+  char *token, *save_ptr;
+  int cnt = 0;
+
+  for (token = strtok_r (args_begin, " ", &save_ptr); token != NULL;
+      token = strtok_r (NULL, " ", &save_ptr))
+    {
+      cnt ++;
+      argv_begin --;
+      *argv_begin = (uint32_t) token;
+    }
+
+  // Args Are now push from left to right, we reverse them.
+  for (uint32_t *L = argv_begin, *R = argv_end - 2; 
+          L < R; 
+          L++, R--) 
+    {
+      uint32_t z = *L;
+      *L = *R;
+      *R = z;
+    }
+
+  uint32_t * p_argv = argv_begin - 1;
+  uint32_t * p_argc = (uint32_t *) (p_argv - 1);
+  uint32_t * p_ret = p_argc - 1;
+
+  *p_argv = (uint32_t) argv_begin;
+  *p_argc = cnt;
+  *p_ret = 0;
+
+  *esp = p_ret;
+
+  ASSERT (argv_end - argv_begin == cnt + 1);
+}
+
+/** 
+ * The entry of child thread
+ * A thread function that loads a user process and starts it running. 
+ * 
+ */
 static void
 start_process (void *file_name_)
 {
+  ASSERT (pg_ofs (file_name_) == 0);
+
   char *file_name = file_name_;
+  char *space = strchr (file_name, ' ');
+
+  // interpret the last 4 bytes of page file_name as a pointer to exit_status.
+  thread_current ()->exit_info = (struct exit_status *) 
+    * (uint32_t *) (file_name + PGSIZE - sizeof(uint32_t));
+
   struct intr_frame if_;
   bool success;
 
@@ -59,12 +184,26 @@ start_process (void *file_name_)
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
+
+  // Exclude args temporarily.
+  if (space != NULL)
+    *space = '\0';
   success = load (file_name, &if_.eip, &if_.esp);
+  if (space != NULL)
+    *space = ' ';
+
+  // Notify process_exec () the result of loading
+  thread_current ()->exit_info->load_success = success;
+  sema_up (& thread_current ()->exit_info->loaded);
 
   /* If load failed, quit. */
-  palloc_free_page (file_name);
-  if (!success) 
+  if (!success) {
+    palloc_free_page (file_name);
     thread_exit ();
+  }
+
+  place__start_args (&if_.esp, file_name);
+  palloc_free_page (file_name); 
 
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
@@ -88,6 +227,28 @@ start_process (void *file_name_)
 int
 process_wait (tid_t child_tid UNUSED) 
 {
+  struct list_elem * elem;
+  struct thread * cur = thread_current ();
+  for (elem = list_begin (&cur->children_info);
+        elem != list_end (&cur->children_info);
+        elem = list_next (elem))
+    {
+      struct exit_status * es = list_entry(elem, struct exit_status, elem); 
+      if (es->child_id == child_tid)
+        {
+          list_remove (elem);
+
+          lock_acquire (&es->mutex);
+          while (!es->child_exited)
+            cond_wait (&es->cond, &es->mutex);
+          int ret = es->exit_value;
+          free (es);
+
+          return ret;
+        }
+    }
+
+  // Not found
   return -1;
 }
 
@@ -97,6 +258,72 @@ process_exit (void)
 {
   struct thread *cur = thread_current ();
   uint32_t *pd;
+  int retval = 0;
+
+  /* The thread name reserve the first 15 character, may including some args */
+  char thread_name[16];
+  memcpy (thread_name, thread_current ()->name, sizeof thread_name);
+  char * space = strchr (thread_name, ' ');
+  if (space != NULL)
+    * space = '\0';
+
+    
+  // Exit status mechanism
+  // See details at the block comment of struct exit_status.
+  if (cur->exit_info)  // Except init thread, every thread should have this member
+    {
+      struct exit_status * es = cur->exit_info;
+      lock_acquire (&es->mutex);
+
+      /* Figure out the return value first */
+      es->child_exited = 1;
+      if (!es->active_exited)
+        es->exit_value = -1;
+      retval = es->exit_value;
+
+      // Print must be before signal the parent.
+      printf ("%s: exit(%d)\n", thread_name, retval);
+
+
+      if (es->parent_exited)
+        free (es);
+      else 
+        {
+          cond_signal (&es->cond, &es->mutex);
+          lock_release (&es->mutex);
+        }
+    }
+
+  // Clean up the children list, but don't wait.
+  // See details at the block comment of struct exit_status.
+  while (!list_empty (&cur->children_info))
+    {
+      struct exit_status * es = list_entry 
+        (list_pop_front (&cur->children_info), struct exit_status, elem);
+      
+      lock_acquire (&es->mutex);
+      if (es->child_exited)
+        free (es);
+      else
+        {
+          es->parent_exited = 1;
+          lock_release (&es->mutex);
+        }
+    }
+
+
+  // Close all files
+  while (list_empty (&cur->opening_files) == false)
+    {
+      struct proc_file * pf = list_entry
+        (list_pop_back (&cur->opening_files), struct proc_file, elem);
+        
+      lock_acquire (&fslock);
+      file_close (pf->file);
+      lock_release (&fslock);
+
+      free(pf);
+    }
 
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
@@ -222,12 +449,17 @@ load (const char *file_name, void (**eip) (void), void **esp)
   process_activate ();
 
   /* Open executable file. */
+  
+  lock_acquire (&fslock);
+
   file = filesys_open (file_name);
   if (file == NULL) 
     {
       printf ("load: %s: open failed\n", file_name);
       goto done; 
     }
+
+  file_deny_write (file); // read only executables
 
   /* Read and verify executable header. */
   if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
@@ -312,7 +544,16 @@ load (const char *file_name, void (**eip) (void), void **esp)
 
  done:
   /* We arrive here whether the load is successful or not. */
-  file_close (file);
+  lock_release (&fslock);
+  if (success)
+    {
+      struct proc_file * pf = malloc (sizeof (struct proc_file));
+      pf->fd = -1; // make it a invalid fd
+      pf->file = file;
+      list_push_back (&thread_current ()->opening_files, &pf->elem);
+    }
+  else
+    file_close (file);
   return success;
 }
 

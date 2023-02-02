@@ -261,3 +261,13 @@ invalidate_pagedir (uint32_t *pd)
       pagedir_activate (pd);
     } 
 }
+
+
+/* Get a pointer to the PTE of the page by virtual address vaddr, in pd, 
+  or NULL if no mapping */
+uint32_t *
+pagedir_lookup_pte (uint32_t * pd, uint8_t * vaddr)
+{
+  uint32_t *p_pte = lookup_page (pd, vaddr, 0);
+  return p_pte;
+}
