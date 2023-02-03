@@ -19,6 +19,8 @@
 #include "threads/vaddr.h"
 #include "threads/malloc.h"
 
+#define MAX_CMD_LINE_LEN (256)
+
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
 
@@ -32,9 +34,9 @@ process_execute (const char *file_name)
   char *fn_copy;
   tid_t tid;
 
-  if (strlen (file_name) + 1 + sizeof(uint32_t) > PGSIZE)
+  if (strlen (file_name) > MAX_CMD_LINE_LEN)
     {
-      // Too long to contain both file_name and the exit_status pointer
+      // Too long command line may overflow the stack page.
       return TID_ERROR;
     }
 

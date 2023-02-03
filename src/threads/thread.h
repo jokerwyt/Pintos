@@ -22,11 +22,14 @@ typedef int tid_t;
 
 /**
  * Shared by the parent and the child. 
- * The last one who exits should free the resource.
+ * The last event following is responsible for freeing resources.
+ * 1. the child's process_exit
+ * 2. the father's process_wait for the child,
+ *    or the father's process_exit (if it has never waited for the child.)
  * 
  * Malloc and initialized at process_execute (),
  * Set exit_value at exit_handler ();
- * Free at process_exit ();
+ * Free at process_exit () or process_wait ();
  * 
  * When the parent waits the child:
  * 1. acquire the mutex
@@ -39,15 +42,15 @@ typedef int tid_t;
  * 2. see child_exited
  * 3. if true, directly free the resource
  * 4. if false setup parent_exited
- * 5. release the mutex
+ *  5. release the mutex
  * 
  * When the child exits:
  * 1. acquire the mutex
  * 2. see parent_exited
  * 3. if true, directly free the resource
  * 4. if false, setup exit_value,
- * 5. and cond_signal ()
- * 6. release the mutex.
+ *  5. and cond_signal ()
+ *  6. release the mutex.
  */
 struct exit_status
   {
