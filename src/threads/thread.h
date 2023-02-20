@@ -166,6 +166,10 @@ struct thread
     struct list opening_files;
     int next_fd;
 
+    struct lock vm_lock;                /* VM lock */
+    struct list user_frames;            /* All frames in used by this threads */
+    int active_pages;                   /* Active user pages cnt */
+
     /* Owned by thread.c. */
     unsigned magic;                     /**< Detects stack overflow. */
   };

@@ -16,6 +16,8 @@
 #include "filesys/file.h"
 #include "lib/user/syscall.h"
 #include "lib/string.h"
+#include "vm/page.h"
+#include "threads/palloc.h"
 
 static void syscall_handler (struct intr_frame *);
 
@@ -33,26 +35,32 @@ syscall_init (void)
 static void 
 validate_page (uint32_t * pd, void * page, bool need_writable)
 {
-  uint32_t * p_pte = pagedir_lookup_pte (pd, page);
+  lock_acquire (&thread_current ()->vm_lock);
 
-  // Can't find x mapping in pd ----> Page fault
-  if (p_pte == NULL || !pte_present (*p_pte))
+  uint32_t * p_pte = pagedir_lookup_pte (pd, page, 0);
+
+  bool exit = 0;
+
+  if (p_pte == NULL || *p_pte == 0)
+    // have no mapping
+    exit = 1;
+  else if (need_writable)
     {
-      thread_exit ();
+      // 2 cases: spte or pte
+      if (  (pte_present (*p_pte) && !pte_writable (*p_pte))
+        || (!pte_present (*p_pte) && !((struct page *) *p_pte)->writable))
+          exit = 1;
     }
-  
-  if (need_writable && !pte_writable (*p_pte))
-    {
-      thread_exit ();
-    }
+
+  lock_release (&thread_current ()->vm_lock);
+  if (exit)
+    thread_exit ();
 }
 
-/*  Validate the address [uaddr, uaddr + len) is user available.
-    If invalid, call thread_exit ().
-*/
-static void 
-validate_uaddr (void * _uaddr, size_t len, bool need_writable)
-{  
+
+static void
+validate_uaddr_no_buffer (void * _uaddr, size_t len, bool need_writable)
+{
   if (len == 0) return;
 
   uint8_t * uaddr = _uaddr; // just for convenience
@@ -69,11 +77,41 @@ validate_uaddr (void * _uaddr, size_t len, bool need_writable)
     }
 }
 
+#define DONT_COPY 0
+#define COPY 1
+/*  Validate the address [uaddr, uaddr + len) is user available.
+    If invalid, call thread_exit ().
 
-/* Validate read only string. If invalid, call thread_exit ().*/
-static void validate_str (const char * s)
+    Allocate some continuous kernel pages as a buffer.
+    if copy == true, copy the data into continuous kernel page.
+    return a ptr with ownership.
+*/
+static void
+validate_uaddr (void * _uaddr, size_t len, bool need_writable, 
+              void ** addr, int * pagecnt, bool copy)
+{
+  validate_uaddr_no_buffer (_uaddr, len, need_writable);
+
+  // validate ok. start to make a copy.
+  *pagecnt = (len + PGSIZE - 1) / PGSIZE;
+  if (*pagecnt == 0)
+    *pagecnt = 1;
+  *addr = palloc_get_multiple (0, *pagecnt);
+  if (*addr == NULL)
+    thread_exit (); // there is no enough space for palloc
+  if (copy)
+    memcpy (*addr, _uaddr, len);
+}
+
+
+/* Validate read only string. If invalid, call thread_exit ().
+  Copy the data into continuous kernel page, return with ownership.
+*/
+static void validate_str (const char * s, void ** addr, int * pagecnt)
 {
   const char * to_check = s;
+  size_t len = 0;
+  const char * origin_start = s;
   while (1) 
     {
       if (s >= to_check)
@@ -83,7 +121,15 @@ static void validate_str (const char * s)
         }
       if (*s == '\0') break;
       s++;
+      len++;
     }
+
+  // validate ok. start to make a copy.
+  *pagecnt = (len + 1 + PGSIZE - 1) / PGSIZE;
+  *addr = palloc_get_multiple (0, *pagecnt);
+  if (*addr == NULL)
+    thread_exit (); // there is no enough space for palloc
+  memcpy (*addr, origin_start, len + 1);
 }
 
 
@@ -91,7 +137,7 @@ static void validate_str (const char * s)
   static uint32_t                                                   \
   get_user_##func_suffix (const type * uaddr)                       \
   {                                                                 \
-    validate_uaddr ( (void *)uaddr, sizeof (type), READ);           \
+    validate_uaddr_no_buffer ( (void *)uaddr, sizeof (type), READ);           \
     return *uaddr;                                                  \
   }                                                                 
 
@@ -99,7 +145,7 @@ static void validate_str (const char * s)
   static void                                                       \
   put_user_##func_suffix (type * uaddr, type val)                   \
   {                                                                 \
-    validate_uaddr ((void *) uaddr, sizeof (type), WRITE);          \
+    validate_uaddr_no_buffer ((void *) uaddr, sizeof (type), WRITE);          \
     *uaddr = val;                                                   \
   }
 
@@ -146,8 +192,12 @@ exit_handler (struct intr_frame *f)
 static void exec_handler (struct intr_frame *f)
 {
   const char * cmd_line = (const char *) ARG(f, 1);
-  validate_str (cmd_line);
-  set_ret (f, process_execute (cmd_line));
+  void * copy;
+  int pagecnt;
+
+  validate_str (cmd_line, &copy, &pagecnt);
+  set_ret (f, process_execute ( (const char *) copy));
+  palloc_free_multiple (copy, pagecnt);
 }
 
 static void wait_handler (struct intr_frame *f)
@@ -160,36 +210,48 @@ static void create_handler (struct intr_frame *f)
 {
   const char * name = (const char *) ARG(f, 1);
   off_t size = ARG(f, 2);
-  int ret = 0;
+  int ret = 0; 
+  void * copy;
+  int pagecnt;
 
-  validate_str (name);
+  validate_str (name, &copy, &pagecnt);
 
   lock_acquire (&fslock);
-  ret = filesys_create (name, size);
+  ret = filesys_create ( (const char *) copy, size);
   lock_release (&fslock);
   set_ret (f, ret);
+
+  palloc_free_multiple (copy, pagecnt);
 }
 
 static void remove_handler (struct intr_frame *f)
 {
   const char * name = (const char *) ARG (f, 1);
+  void * copy;
+  int pagecnt;
 
-  validate_str (name);
+  validate_str (name, &copy, &pagecnt);
 
   lock_acquire (&fslock);
   set_ret (f, filesys_remove (name));
   lock_release (&fslock);
+  palloc_free_multiple (copy, pagecnt);
 }
 
 static void open_handler (struct intr_frame *f)
 {
-  const char *name = (const char *) ARG (f, 1);  
+  const char *name = (const char *) ARG (f, 1);
   struct thread * cur = thread_current ();
-  validate_str (name);
+  void * copy;
+  int pagecnt;
+
+  validate_str (name, &copy, &pagecnt);
+
   
   lock_acquire (&fslock);
   struct file * file = filesys_open (name);
   lock_release (&fslock);
+  palloc_free_multiple (copy, pagecnt);
 
   if (file == NULL)
     set_ret (f, -1); // unsuccessfully
@@ -269,21 +331,25 @@ write_handler (struct intr_frame *f)
   int fd = ARG (f, 1);
   const void *buffer = (const void *) ARG (f, 2);
   unsigned size = ARG (f, 3);
+  void * copy;
+  int pagecnt;
 
-  validate_uaddr ( (void *) buffer, size, READ);
 
   if (fd == STDOUT_FILENO)
     {
-      putbuf(buffer, size);
+      validate_uaddr ( (void *) buffer, size, READ, &copy, &pagecnt, COPY);
+      putbuf(copy, size);
     }
   else 
     {
       struct list_elem * elem = validate_fd (fd);
+      validate_uaddr ( (void *) buffer, size, READ, &copy, &pagecnt, COPY);
       struct proc_file * pf = list_entry (elem, struct proc_file, elem);
 
       lock_acquire (&fslock);
       set_ret (f, file_write (pf->file, buffer, size));
       lock_release (&fslock);
+      palloc_free_multiple (copy, pagecnt);
     }
 }
 
@@ -294,10 +360,10 @@ read_handler (struct intr_frame *f)
   uint8_t *buffer = (uint8_t *) ARG (f, 2);
   size_t size = ARG (f, 3);
 
-  validate_uaddr (buffer, size, WRITE);
 
   if (fd == STDIN_FILENO)
     {
+      validate_uaddr_no_buffer ( (void *) buffer, size, WRITE );
       for (size_t _ = 0; _ < size; _++, buffer ++)
         *buffer = input_getc ();
       set_ret (f, size);
@@ -306,9 +372,18 @@ read_handler (struct intr_frame *f)
     {
       struct list_elem * elem = validate_fd (fd);
       struct proc_file * pf = list_entry (elem, struct proc_file, elem);
+
+      
+      void *copy;
+      int pagecnt;
+      validate_uaddr ( (void *) buffer, size, WRITE, &copy, &pagecnt, DONT_COPY);
+      
       lock_acquire (&fslock);
-      set_ret (f, file_read (pf->file, buffer, size));
+      set_ret (f, file_read (pf->file, copy, size));
       lock_release (&fslock);
+
+      memcpy (buffer, copy, size);
+      palloc_free_multiple (copy, pagecnt);
     }
 }
 
@@ -399,6 +474,7 @@ syscall_handler (struct intr_frame *f)
 
 
     default:
-      break; //TODO do something ?
+      // unknown syscall
+      thread_exit ();
     }
 }

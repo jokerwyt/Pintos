@@ -5,6 +5,9 @@
 #include "threads/init.h"
 #include "threads/pte.h"
 #include "threads/palloc.h"
+#include "threads/synch.h"
+#include "vm/page.h"
+#include "vm/swap.h"
 
 static uint32_t *active_pd (void);
 static void invalidate_pagedir (uint32_t *);
@@ -40,8 +43,23 @@ pagedir_destroy (uint32_t *pd)
         uint32_t *pte;
         
         for (pte = pt; pte < pt + PGSIZE / sizeof *pte; pte++)
-          if (*pte & PTE_P) 
-            palloc_free_page (pte_get_page (*pte));
+          {
+            uint32_t pte_v = *pte;
+            if (pte_v & PTE_P) 
+                PANIC ("page cached when process_exit");
+            else 
+              {
+                // free supplemental page table and swap slot
+                
+                struct page * page = (struct page *) pte_v;
+                if (page == NULL) continue;
+                
+                if (page->status == PAGE_SWAP)
+                    swap_free (page->swap_offset); 
+                
+                page_free (page);
+              }
+          }
         palloc_free_page (pt);
       }
   palloc_free_page (pd);
@@ -266,8 +284,8 @@ invalidate_pagedir (uint32_t *pd)
 /* Get a pointer to the PTE of the page by virtual address vaddr, in pd, 
   or NULL if no mapping */
 uint32_t *
-pagedir_lookup_pte (uint32_t * pd, uint8_t * vaddr)
+pagedir_lookup_pte (uint32_t * pd, uint8_t * vaddr, bool create)
 {
-  uint32_t *p_pte = lookup_page (pd, vaddr, 0);
+  uint32_t *p_pte = lookup_page (pd, vaddr, create);
   return p_pte;
 }

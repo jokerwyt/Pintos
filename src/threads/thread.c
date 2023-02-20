@@ -472,6 +472,8 @@ init_thread (struct thread *t, const char *name, int priority)
   t->next_fd = MIN_FD;
   list_init (&t->opening_files);
   list_init (&t->children_info);
+  list_init (&t->user_frames);
+  lock_init (&t->vm_lock);
 
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);
