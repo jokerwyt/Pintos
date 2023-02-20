@@ -123,7 +123,7 @@ pg's frame is not in active_frames now.
 
 steps:
    1. remove the frame frorm user_frames
-   2. recycle the frame (into swap if possible)
+   2. recycle the frame (into swap if needed)
 */
 struct frame * page_swap_out (struct page * pg)
 {

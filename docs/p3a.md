@@ -4,7 +4,7 @@
 
 >Fill in your name and email address.
 
-FirstName LastName <email@domain.example>
+永彤 吴 wuyongtong@stu.pku.edu.cn
 
 >If you have any preliminary comments on your submission, notes for the TAs, please give them here.
 
@@ -20,6 +20,89 @@ FirstName LastName <email@domain.example>
 
 >A1: Copy here the declaration of each new or changed struct or struct member, global or static variable, typedef, or enumeration.  Identify the purpose of each in 25 words or less.
 
+```c
+// thread.h
+struct thread
+  {
+    struct lock vm_lock;                /* VM lock (per thread) */
+    struct list user_frames;            /* All frames in used by this threads */
+    int active_pages;                   /* Active user pages cnt */    
+  }
+
+// page.h
+enum page_status
+  {
+    PAGE_FILE,       // the page is located in a file
+    PAGE_SWAP,       // the page is located in a swap slot
+    PAGE_FRAME       // the page is now caching in a frame, i.e. in the main memory
+  };
+
+struct file_segment
+  {
+    struct file * file;
+    off_t offset;   
+    uint32_t len;   // rest part is filled with 0. if len == 0, dont open file
+  };
+
+/* an entry of the supplemental page table.
+
+  only pages with status PAGE_FRAME are shared with other thread
+ */
+struct page
+  {
+    struct thread * owner;
+
+    bool block_offset;  // the beginning of struct page must align to 2,
+                        // so we need to know whether an 1 byte offset is applied 
+                        // when malloc and free
+    bool writable;
+    
+    void * user_address; // the user address of the page (less than 3G)
+
+    enum page_status status;
+
+
+    bool load_from_file;		  // is the page loaded from file
+    struct file_segment file_seg; // the file location
+    off_t swap_offset;            // the swap location (if swap out)
+    struct frame * frame;         // the frame pointer (if cached in memory)
+  };
+
+// frame.h
+struct frame
+  {
+    struct page * page;     // the page it's now caching, NULL if available
+    bool pin;               // limit evict
+    void *kernel_address;   // greater than 3G
+
+    struct list_elem thr_elem; // list thr_frames
+    struct list_elem elem; // list active_frames
+  };
+
+// frame.c
+// store all active frames
+static struct list active_frames = LIST_INITIALIZER(active_frames); 
+
+static struct lock frames_lock; // lock active_frames
+static struct condition cond; // notify when a frame is activated.
+
+
+// swap.c
+
+struct swap_slot
+  {
+    off_t offset;
+    struct list_elem elem;
+  };
+
+static struct block * swap;	  // the block device
+
+static struct condition cond; // notify when a swap slot becomes available.
+static struct lock swap_lock; // lock free_slots
+
+static struct list free_slots = LIST_INITIALIZER (free_slots); // restore all free slots
+```
+
 
 
 #### ALGORITHMS
@@ -27,11 +110,17 @@ FirstName LastName <email@domain.example>
 >A2: In a few paragraphs, describe your code for accessing the data
 >stored in the SPT about a given page.
 
+1. Putting the pointer to SPT in the PTE's 31 free bits allows the OS to get SPT when page faults happen. 
+2. When loading a page, fetch the SPT's pointer from PTE, and set PTE to the physical address. 
+3. When swapping it out, put the SPT's pointer back into PTE.
+
 
 
 >A3: How does your code coordinate accessed and dirty bits between
 >kernel and user virtual addresses that alias a single frame, or
 >alternatively how do you avoid the issue?
+
+Kernel accesses user pages only when the process makes a syscall. These bits are used to make frame eviction decisions and do swap optimization. So the kernel only accesses user pages when syscalls happen for necessary data exchange. When loading pages or swapping them out, the kernel always used kernel virtual addresses.
 
 
 
@@ -40,6 +129,8 @@ FirstName LastName <email@domain.example>
 >A4: When two user processes both need a new frame at the same time,
 >how are races avoided?
 
+Synchronization is needed when eviction happens. Locking the active frames list when finding a frame to evict avoids races.
+
 
 
 #### RATIONALE
@@ -47,13 +138,17 @@ FirstName LastName <email@domain.example>
 >A5: Why did you choose the data structure(s) that you did for
 >representing virtual-to-physical mappings?
 
-
+1. Space benefits. Putting SPT's pointer into the page directory reduces unnecessary addressing memory costs and improves the cache locality to speed up the page fault handler.
+2. Time complexity benefits. There is almost no extra overhead to do demand paging. It is an O(1) implementation, except for the clock algorithm for frame eviction.
+3. Modularization. Dividing The VM system into page, frame, and swap provides better code readability and maintainability.
 
 ## Paging To And From Disk
 
 #### DATA STRUCTURES
 
 >B1: Copy here the declaration of each new or changed struct or struct member, global or static variable, typedef, or enumeration.  Identify the purpose of each in 25 words or less.
+
+see previous one.
 
 
 
@@ -62,13 +157,15 @@ FirstName LastName <email@domain.example>
 >B2: When a frame is required but none is free, some frame must be
 >evicted.  Describe your code for choosing a frame to evict.
 
+The kernel acquires mutex access to the active frames list, which contains at least one page through a lock and a condition variable. Then it runs the Clock algorithm to decide a frame to evict.
+
 
 
 >B3: When a process P obtains a frame that was previously used by a
 >process Q, how do you adjust the page table (and any other data
 >structures) to reflect the frame Q no longer has?
 
-
+The kernel will acquire process Q's VM lock first and then modify Q's pagedir to detach the page. After that, the kernel will modify the struct page's data to inform process Q that this page has been evicted. After detaching the frame from Q, the kernel releases Q's VM lock, acquires P's VM lock, loads the page's content into the frame, and modifies Q's struct page and the PTE.
 
 #### SYNCHRONIZATION
 
@@ -77,7 +174,12 @@ FirstName LastName <email@domain.example>
 >textbook for an explanation of the necessary conditions for
 >deadlock.)
 
+Every process has a VM lock to protect the page table, supplemental page table, and the frames it owns. Locks and conditional variables are used to protect the active frame list and the swap slot list.
 
+The locking order is as follows:
+`frames_lock->all vm_lock->fslock`
+
+The process can only hold one VM lock at the same time. So circular wait will never happen, which is one of the four necessary conditions for deadlock. 
 
 >B6: A page fault in process P can cause another process Q's frame
 >to be evicted.  How do you ensure that Q cannot access or modify
@@ -86,10 +188,16 @@ FirstName LastName <email@domain.example>
 
 
 
+P will acquire Q's VM lock first and install an SPT pointer to Q's PTE. After that, A page fault may be triggered by any access to this page from Q, but it will block until it gains its VM lock, before which P will complete the eviction process and release Q's VM lock.
+
+
+
 >B7: Suppose a page fault in process P causes a page to be read from
 >the file system or swap.  How do you ensure that a second process Q
 >cannot interfere by e.g. attempting to evict the frame while it is
 >still being read in?
+
+Adding the frame to the global active frame list enables it to be evicted. Doing this action after finishing loading the page prevents such data race.
 
 
 
@@ -101,6 +209,10 @@ FirstName LastName <email@domain.example>
 
 
 
+This problem's key point is that page faults should not happen when the file system locks. I use page faults to bring in pages, allocate a temporary kernel page buffer to store data during file system operation, and then copy the data into user pages (or read data from user pages into the buffer in advance). I don't have a "locking" frame mechanism. This design does not affect the validation process of user-given virtual addresses.
+
+
+
 #### RATIONALE
 
 >B9: A single lock for the whole VM system would make
@@ -109,3 +221,5 @@ FirstName LastName <email@domain.example>
 >possibility for deadlock but allows for high parallelism.  Explain
 >where your design falls along this continuum and why you chose to
 >design it this way.
+
+I assign every process a VM lock. Although doing this limits the parallelism, compared with locking a single page instead, it is more straightforward and more uncomplicated for the programmer to write bug-free code. It also prevents deadlock by arranging the lock order carefully.   In the meantime, per-process lock design still reserves enough parallelism.

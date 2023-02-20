@@ -9,7 +9,7 @@
 struct frame
   {
     struct page * page;     // the page it's now caching, NULL if available
-    bool pin;               // limit evit
+    bool pin;               // limit evict
     void *kernel_address;   // greater than 3G
     
     struct list_elem thr_elem; // list thr_frames
@@ -18,7 +18,7 @@ struct frame
 
 void frame_init (void);
 
-// malloc a frame from user pool, or evit one.
+// malloc a frame from user pool, or evict one.
 // return with ownership of the struct frame
 struct frame * frame_alloc (void);
 

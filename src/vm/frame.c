@@ -35,7 +35,7 @@ static bool contain_evitable_frames (void)
   return false;
 }
 
-// malloc a frame from user pool, or evit one.
+// malloc a frame from user pool, or evict one.
 // return with ownership of the struct frame.
 struct frame * frame_alloc ()
 {
@@ -54,12 +54,11 @@ struct frame * frame_alloc ()
     }
   else
     {
-      // evit a frame: clock algorithm
+      // evict a frame: clock algorithm
       lock_acquire (&frames_lock);
 
       while (!contain_evitable_frames ())
         {
-          printf ("1");
           cond_wait (&cond, &frames_lock);
         }
       // wait until at least one frames can be evited
@@ -82,7 +81,7 @@ struct frame * frame_alloc ()
               }
             else 
               {
-                // found the one to evit
+                // found the one to evict
                 // get the frame where pg is cached
 
                 // remove the mapping, may cause page fault immediately
