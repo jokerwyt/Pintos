@@ -178,8 +178,8 @@ off_t frame_recycle (struct frame * frame, bool swap)
 
 static void free_a_frame (struct hash_elem * elem, void * aux UNUSED)
 {
-  struct pte_page_pair * ppp = 
-    hash_entry (elem, struct pte_page_pair, hash_elem);
+  struct paddr_page_pair * ppp = 
+    hash_entry (elem, struct paddr_page_pair, hash_elem);
 
   ASSERT (ppp != NULL);
   ASSERT (ppp->pg != NULL);
@@ -208,7 +208,7 @@ void frame_free_all ()
   lock_acquire (&frames_lock);
   lock_acquire (&cur->vm_lock);
 
-  hash_apply (&cur->pte_page_mapping, free_a_frame);
+  hash_apply (&cur->paddr_page_mapping, free_a_frame);
 
   lock_release (&cur->vm_lock);
   lock_release (&frames_lock);

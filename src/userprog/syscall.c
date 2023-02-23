@@ -17,6 +17,7 @@
 #include "lib/user/syscall.h"
 #include "lib/string.h"
 #include "vm/page.h"
+#include "vm/frame.h"
 #include "threads/palloc.h"
 
 static void syscall_handler (struct intr_frame *);
@@ -59,7 +60,7 @@ validate_page (uint32_t * pd, void * page, bool need_writable)
 
 
 static void
-validate_uaddr_no_buffer (void * _uaddr, size_t len, bool need_writable)
+validate_uaddr (void * _uaddr, uint32_t len, bool need_writable)
 {
   if (len == 0) return;
 
@@ -77,41 +78,14 @@ validate_uaddr_no_buffer (void * _uaddr, size_t len, bool need_writable)
     }
 }
 
-#define DONT_COPY 0
-#define COPY 1
-/*  Validate the address [uaddr, uaddr + len) is user available.
-    If invalid, call thread_exit ().
-
-    Allocate some continuous kernel pages as a buffer.
-    if copy == true, copy the data into continuous kernel page.
-    return a ptr with ownership.
-*/
-static void
-validate_uaddr (void * _uaddr, size_t len, bool need_writable, 
-              void ** addr, bool copy)
-{
-  validate_uaddr_no_buffer (_uaddr, len, need_writable);
-
-  // validate ok. start to make a copy.
-  *addr = malloc (len);
-  if (len > 0 && *addr == NULL)
-    {
-      printf ("strange exit\n");
-      thread_exit (); // there is no enough space for palloc
-    }
-  if (copy)
-    memcpy (*addr, _uaddr, len);
-}
-
 
 /* Validate read only string. If invalid, call thread_exit ().
   Copy the data into continuous kernel page, return with ownership.
 */
-static void validate_str (const char * s, void ** addr)
+static void validate_str (const char * s, uint32_t *_len)
 {
   const char * to_check = s;
-  size_t len = 0;
-  const char * origin_start = s;
+  uint32_t len = 0;
   while (1) 
     {
       if (s >= to_check)
@@ -123,20 +97,68 @@ static void validate_str (const char * s, void ** addr)
       s++;
       len++;
     }
-
-  // validate ok. start to make a copy.
-  *addr = malloc (len + 1);
-  if (*addr == NULL)
-    thread_exit (); // there is no enough space for palloc
-  memcpy (*addr, origin_start, len + 1);
+  *_len = len;
 }
 
+
+static void fault_in_and_pin (uint8_t * addr, uint32_t size)
+{
+  uint8_t * end = addr + size;
+  uint8_t * now = pg_round_down (addr);
+  struct thread * cur = thread_current ();
+  lock_acquire (&cur->vm_lock);
+  while (now < end)
+    {
+      ASSERT (pagedir_has_mapping (cur->pagedir, now));
+
+      uint32_t * p_pte = pagedir_lookup_pte (cur->pagedir, (uint8_t *) now, 0);
+      ASSERT (p_pte != 0 && *p_pte != 0);
+
+      if (pte_present (*p_pte))
+        {
+          struct page * pg = process_pte_to_page (*p_pte);
+          ASSERT (pg != NULL && pg->frame != NULL);
+          pg->frame->pin = PIN;
+        }
+      else
+        {
+          lock_release (&cur->vm_lock);
+          // other thread won't make this page loaded.
+          page_load (now, PIN);
+          lock_acquire (&cur->vm_lock);
+        }
+
+      now += PGSIZE;
+    }
+  lock_release (&cur->vm_lock);
+}
+
+static void unpin (uint8_t * addr, uint32_t size)
+{
+  uint8_t * end = addr + size;
+  uint8_t * now = pg_round_down (addr);
+  struct thread * cur = thread_current ();
+
+  lock_acquire (&cur->vm_lock);
+  while (now < end)
+    {
+      uint32_t * p_pte = pagedir_lookup_pte (cur->pagedir, (uint8_t *) now, 0);
+      // this should be pinned in the memory
+      ASSERT (p_pte != 0 && *p_pte != 0);
+      struct page * pg = process_pte_to_page (*p_pte);
+      ASSERT (pg->frame != NULL);
+      pg->frame->pin = DONT_PIN;
+
+      now += PGSIZE;
+    }
+  lock_release (&cur->vm_lock);
+}
 
 #define DEFINE_GET(func_suffix, type)                               \
   static uint32_t                                                   \
   get_user_##func_suffix (const type * uaddr)                       \
   {                                                                 \
-    validate_uaddr_no_buffer ( (void *)uaddr, sizeof (type), READ);           \
+    validate_uaddr ( (void *)uaddr, sizeof (type), READ);           \
     return *uaddr;                                                  \
   }                                                                 
 
@@ -144,7 +166,7 @@ static void validate_str (const char * s, void ** addr)
   static void                                                       \
   put_user_##func_suffix (type * uaddr, type val)                   \
   {                                                                 \
-    validate_uaddr_no_buffer ((void *) uaddr, sizeof (type), WRITE);          \
+    validate_uaddr ((void *) uaddr, sizeof (type), WRITE);          \
     *uaddr = val;                                                   \
   }
 
@@ -191,11 +213,13 @@ exit_handler (struct intr_frame *f)
 static void exec_handler (struct intr_frame *f)
 {
   const char * cmd_line = (const char *) ARG(f, 1);
-  void * copy;
+  uint32_t len = 0;
 
-  validate_str (cmd_line, &copy);
-  set_ret (f, process_execute ( (const char *) copy));
-  free (copy);
+  validate_str (cmd_line, &len);
+
+  fault_in_and_pin ( (uint8_t *) cmd_line, len);
+  set_ret (f, process_execute ( (const char *) cmd_line));
+  unpin ( (uint8_t *) cmd_line, len);
 }
 
 static void wait_handler (struct intr_frame *f)
@@ -208,44 +232,48 @@ static void create_handler (struct intr_frame *f)
 {
   const char * name = (const char *) ARG(f, 1);
   off_t size = ARG(f, 2);
-  int ret = 0; 
-  void * copy;
+  uint32_t len = 0;
 
-  validate_str (name, &copy);
+  validate_str (name, &len);
 
+  fault_in_and_pin ( (uint8_t *) name, len);
+  
   lock_acquire (&fslock);
-  ret = filesys_create ( (const char *) copy, size);
+  set_ret (f, filesys_create ( (const char *) name, size));
   lock_release (&fslock);
-  set_ret (f, ret);
 
-  free (copy);
+  unpin ( (uint8_t *) name, len);
 }
 
 static void remove_handler (struct intr_frame *f)
 {
   const char * name = (const char *) ARG (f, 1);
-  void * copy;
+  uint32_t len = 0;
 
-  validate_str (name, &copy);
+  validate_str (name, &len);
+  
+  fault_in_and_pin ( (uint8_t *) name, len);
 
   lock_acquire (&fslock);
   set_ret (f, filesys_remove (name));
   lock_release (&fslock);
-  free (copy);
+
+  unpin ( (uint8_t *) name, len);
 }
 
 static void open_handler (struct intr_frame *f)
 {
   const char *name = (const char *) ARG (f, 1);
-  void * copy;
+  uint32_t len = 0;
 
-  validate_str (name, &copy);
+  validate_str (name, &len);
 
   
+  fault_in_and_pin ( (uint8_t *) name, len);
   lock_acquire (&fslock);
   struct file * file = filesys_open (name);
   lock_release (&fslock);
-  free (copy);
+  unpin ( (uint8_t *) name, len);
 
   if (file == NULL)
     set_ret (f, -1); // unsuccessfully
@@ -320,28 +348,27 @@ static void
 write_handler (struct intr_frame *f)
 {
   int fd = ARG (f, 1);
-  const void *buffer = (const void *) ARG (f, 2);
+  uint8_t *buffer = (uint8_t *) ARG (f, 2);
   unsigned size = ARG (f, 3);
-  void * copy;
 
 
   if (fd == STDOUT_FILENO)
     {
-      validate_uaddr ( (void *) buffer, size, READ, &copy, COPY );
-      putbuf(copy, size);
-      free (copy);
+      validate_uaddr ( (void *) buffer, size, READ);
+      putbuf ( (char *) buffer, size);
     }
   else 
     {
       struct list_elem * elem = validate_fd (fd);
-      validate_uaddr ( (void *) buffer, size, READ, &copy, COPY);
+      validate_uaddr ( (void *) buffer, size, READ);
       struct proc_file * pf = list_entry (elem, struct proc_file, elem);
 
+      fault_in_and_pin ( buffer, size);
       lock_acquire (&fslock);
-      set_ret (f, file_write (pf->file, copy, size));
+      set_ret (f, file_write (pf->file, buffer, size));
       lock_release (&fslock);
 
-      free (copy);
+      unpin ( buffer, size);
     }
 }
 
@@ -355,7 +382,7 @@ read_handler (struct intr_frame *f)
 
   if (fd == STDIN_FILENO)
     {
-      validate_uaddr_no_buffer ( (void *) buffer, size, WRITE );
+      validate_uaddr ( (void *) buffer, size, WRITE );
       for (size_t _ = 0; _ < size; _++, buffer ++)
         *buffer = input_getc ();
       set_ret (f, size);
@@ -366,15 +393,15 @@ read_handler (struct intr_frame *f)
       struct proc_file * pf = list_entry (elem, struct proc_file, elem);
 
       
-      void *copy;
-      validate_uaddr ( (void *) buffer, size, WRITE, &copy, DONT_COPY);
+      validate_uaddr ( (void *) buffer, size, WRITE);
       
+      fault_in_and_pin (buffer, size);
+
       lock_acquire (&fslock);
-      set_ret (f, file_read (pf->file, copy, size));
+      set_ret (f, file_read (pf->file, buffer, size));
       lock_release (&fslock);
 
-      memcpy (buffer, copy, size);
-      free (copy);
+      unpin (buffer, size);
     }
 }
 

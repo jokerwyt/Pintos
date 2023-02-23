@@ -72,13 +72,13 @@ static void load_into_frame (struct page * pg, struct frame * f)
   pg->status = PAGE_FRAME;
 }
 
-static struct pte_page_pair *
-malloc_pte_page_pair (uint32_t pte, struct page * pg)
+static struct paddr_page_pair *
+malloc_paddr_page_pair (void * paddr, struct page * pg)
 {
-  struct pte_page_pair * p = malloc(sizeof (struct pte_page_pair));
+  struct paddr_page_pair * p = malloc(sizeof (struct paddr_page_pair));
   if (p)
     {
-      p->pte = pte;
+      p->paddr = paddr;
       p->pg  = pg;
     }
   return p;
@@ -87,6 +87,11 @@ malloc_pte_page_pair (uint32_t pte, struct page * pg)
 static uint32_t get_pte (struct page * pg)
 {
   return pte_create_user ((void *)pg->frame->kernel_address, pg->writable);
+}
+
+static void * get_paddr (struct page * pg)
+{
+  return pte_get_page ( get_pte (pg) );
 }
 
 /* look up supplemental page table and load a page */
@@ -123,13 +128,14 @@ bool page_load (void * upage, bool pin)
 
     // install the frame into pagedir
 
-    struct pte_page_pair * ptr = malloc_pte_page_pair (get_pte ( pg ), pg);
+    struct paddr_page_pair * ptr = 
+      malloc_paddr_page_pair ( get_paddr ( pg ), pg);
     if (ptr == NULL)
-      success = false;
+        success = false;
     else
       {
-        // printf("insert pte %x pages %x\n", get_pte (pg), pg);
-        hash_insert (&cur->pte_page_mapping, &ptr->hash_elem);
+        // printf("insert paddr %x,  pages %x\n", get_paddr (pg), pg);
+        hash_insert (&cur->paddr_page_mapping, &ptr->hash_elem);
         *p_pte = get_pte ( pg );
       }
   }
@@ -149,12 +155,13 @@ static void remove_from_mapping (struct hash * mapping, struct page * pg)
   ASSERT ( lock_held_by_current_thread (&pg->owner->vm_lock) );
   ASSERT (pg->frame != NULL);
 
-  struct pte_page_pair p;
+  struct paddr_page_pair p;
   p.pg = pg;
-  p.pte = get_pte (pg);
+  p.paddr = get_paddr (pg);
+  // printf ("remove paddr %x\n", p.paddr);
   struct hash_elem * he = hash_delete (mapping, &p.hash_elem);
   ASSERT (he != NULL);
-  struct pte_page_pair *ptr = hash_entry (he, struct pte_page_pair, hash_elem);
+  struct paddr_page_pair *ptr = hash_entry (he, struct paddr_page_pair, hash_elem);
   ASSERT (ptr != NULL);
   free (ptr);
 }
@@ -185,31 +192,31 @@ struct frame * page_swap_out (struct page * pg)
       pg->status = PAGE_SWAP;
     }
 
-  remove_from_mapping (&pg->owner->pte_page_mapping, pg);
+  remove_from_mapping (&pg->owner->paddr_page_mapping, pg);
 
   pg->frame = NULL;
   return frame;
 }
 
-void pte_page_pair_destructor (struct hash_elem *p_, void *aux UNUSED)
+void paddr_page_pair_destructor (struct hash_elem *p_, void *aux UNUSED)
 {
-  struct pte_page_pair *p = hash_entry (p_, struct pte_page_pair, hash_elem);
+  struct paddr_page_pair *p = hash_entry (p_, struct paddr_page_pair, hash_elem);
   free (p);
 }
 
 unsigned
-pte_page_pair_hash (const struct hash_elem *p_, void *aux UNUSED)
+paddr_page_pair_hash (const struct hash_elem *p_, void *aux UNUSED)
 {
-  const struct pte_page_pair *p = hash_entry (p_, struct pte_page_pair, hash_elem);
-  return hash_int (p->pte);
+  const struct paddr_page_pair *p = hash_entry (p_, struct paddr_page_pair, hash_elem);
+  return hash_bytes (&p->paddr, sizeof (p->paddr));
 }
 
 bool
-pte_page_pair_less (const struct hash_elem *a_, const struct hash_elem *b_,
+paddr_page_pair_less (const struct hash_elem *a_, const struct hash_elem *b_,
            void *aux UNUSED)
 {
-  const struct pte_page_pair *a = hash_entry (a_, struct pte_page_pair, hash_elem);
-  const struct pte_page_pair *b = hash_entry (b_, struct pte_page_pair, hash_elem);
+  const struct paddr_page_pair *a = hash_entry (a_, struct paddr_page_pair, hash_elem);
+  const struct paddr_page_pair *b = hash_entry (b_, struct paddr_page_pair, hash_elem);
 
-  return a->pte < b->pte;
+  return a->paddr < b->paddr;
 }

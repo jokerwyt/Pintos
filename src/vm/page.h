@@ -52,6 +52,8 @@ struct page *
 page_alloc_init (void * uaddr, struct file * file, 
             off_t ofs, uint32_t len, bool writable);
 
+#define PIN 1
+#define DONT_PIN 0
 bool page_load (void * upage, bool pin);
 
 void page_free (struct page * pg);
@@ -59,21 +61,21 @@ void page_free (struct page * pg);
 struct frame * page_swap_out (struct page * pg);
 
 
-struct pte_page_pair
+struct paddr_page_pair
   {
     struct hash_elem hash_elem;
-    uint32_t pte;
+    void * paddr;
     struct page * pg;
   };
 
 unsigned
-pte_page_pair_hash (const struct hash_elem *p_, void *aux);
+paddr_page_pair_hash (const struct hash_elem *p_, void *aux);
 
 bool
-pte_page_pair_less (const struct hash_elem *a_, const struct hash_elem *b_,
+paddr_page_pair_less (const struct hash_elem *a_, const struct hash_elem *b_,
            void *aux);
 
-void pte_page_pair_destructor (struct hash_elem *p_, void *aux);
+void paddr_page_pair_destructor (struct hash_elem *p_, void *aux);
 
 
 #endif

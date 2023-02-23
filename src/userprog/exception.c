@@ -180,7 +180,7 @@ page_fault (struct intr_frame *f)
   if (page_load (pg_round_down (fault_addr), 0 /* dont pin */) == false)
     {
       // page load fail
-      // printf ("Bad page fault %s %x\n", thread_current ()->name, fault_addr);
+      printf ("Bad page fault %s %x\n", thread_current ()->name, fault_addr);
       thread_exit ();
     }
   // printf ("Page fault finished %s %x\n", thread_current ()->name, fault_addr);

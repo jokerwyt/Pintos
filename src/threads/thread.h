@@ -168,7 +168,7 @@ struct thread
     int next_fd;
 
     struct lock vm_lock;                /* VM lock */
-    struct hash pte_page_mapping;       /* map pte to struct page */
+    struct hash paddr_page_mapping;       /* map pte to struct page */
 
     /* Owned by thread.c. */
     unsigned magic;                     /**< Detects stack overflow. */

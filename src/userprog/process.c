@@ -21,6 +21,7 @@
 #include "vm/page.h"
 #include "vm/frame.h"
 #include "lib/kernel/hash.h"
+#include "threads/pte.h"
 
 #define MAX_CMD_LINE_LEN (256)
 
@@ -204,14 +205,14 @@ start_process (void *file_name_)
   /* If load failed, quit. */
   if (!success) {
     palloc_free_page (file_name);
-    printf ("load fail\n");
+    // printf ("load fail\n");
     thread_exit ();
   }
 
 
   /* Init frame pages mapping hash table */
   struct thread * cur = thread_current ();
-  hash_init (&cur->pte_page_mapping, pte_page_pair_hash, pte_page_pair_less, NULL);
+  hash_init (&cur->paddr_page_mapping, paddr_page_pair_hash, paddr_page_pair_less, NULL);
 
   // page fault is possible when placing args
   
@@ -269,7 +270,7 @@ process_wait (tid_t child_tid UNUSED)
 void
 process_exit (void)
 {
-  // debug_backtrace ();
+  debug_backtrace ();
 
   struct thread *cur = thread_current ();
   uint32_t *pd;
@@ -353,7 +354,7 @@ process_exit (void)
          directory, or our active page directory will be one
          that's been freed (and cleared). */
       frame_free_all ();
-      hash_destroy (&cur->pte_page_mapping, pte_page_pair_destructor);
+      hash_destroy (&cur->paddr_page_mapping, paddr_page_pair_destructor);
 
       cur->pagedir = NULL;
       pagedir_activate (NULL);
@@ -695,4 +696,17 @@ setup_stack (void **esp)
 
   *esp = PHYS_BASE;
   return true;
+}
+
+
+
+struct page * process_pte_to_page (uint32_t pte)
+{
+  struct paddr_page_pair p;
+  p.paddr = pte_get_page (pte);
+  // printf ("query paddr %x\n", p.paddr);
+  struct hash_elem * he = hash_find (&thread_current ()->paddr_page_mapping, &p.hash_elem);
+  if (he == NULL) 
+    return NULL;
+  return hash_entry (he, struct paddr_page_pair, hash_elem)->pg;
 }
