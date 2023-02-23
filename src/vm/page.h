@@ -5,6 +5,7 @@
 #include "threads/synch.h"
 #include "filesys/off_t.h"
 #include <list.h>
+#include "lib/kernel/hash.h"
 
 enum page_status
   {
@@ -56,4 +57,23 @@ bool page_load (void * upage, bool pin);
 void page_free (struct page * pg);
 
 struct frame * page_swap_out (struct page * pg);
+
+
+struct pte_page_pair
+  {
+    struct hash_elem hash_elem;
+    uint32_t pte;
+    struct page * pg;
+  };
+
+unsigned
+pte_page_pair_hash (const struct hash_elem *p_, void *aux);
+
+bool
+pte_page_pair_less (const struct hash_elem *a_, const struct hash_elem *b_,
+           void *aux);
+
+void pte_page_pair_destructor (struct hash_elem *p_, void *aux);
+
+
 #endif

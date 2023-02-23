@@ -289,3 +289,14 @@ pagedir_lookup_pte (uint32_t * pd, uint8_t * vaddr, bool create)
   uint32_t *p_pte = lookup_page (pd, vaddr, create);
   return p_pte;
 }
+
+/* Check if there is a mapping at vaddr in pd */
+bool pagedir_has_mapping (uint32_t * pd, void * vaddr)
+{
+  // printf("has mapping query %x\n", vaddr);
+  uint32_t *p_pte = pagedir_lookup_pte (pd, vaddr, 0);
+  if (p_pte == NULL || *p_pte == 0)
+    return false;
+  else  // there is a pte or a spte.
+    return true;
+}

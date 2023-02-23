@@ -8,7 +8,8 @@
 #include "filesys/file.h"
 #include "userprog/pagedir.h"
 #include "lib/string.h"
-  
+#include "lib/kernel/hash.h"
+
 static struct list active_frames = LIST_INITIALIZER(active_frames);
 static struct lock frames_lock;
 static struct condition cond; // notify when a frame is activated.
@@ -89,7 +90,6 @@ struct frame * frame_alloc ()
                 (void) page_swap_out ( pg );
                 page_install_spte ( pg );
                 return_frame = hand;
-                pg->owner->active_pages --;
               }
           }
           lock_release (&pg->owner->vm_lock);
@@ -176,7 +176,31 @@ off_t frame_recycle (struct frame * frame, bool swap)
     return -1;
 }
 
-/* Free all current thread's user frames */
+static void free_a_frame (struct hash_elem * elem, void * aux UNUSED)
+{
+  struct pte_page_pair * ppp = 
+    hash_entry (elem, struct pte_page_pair, hash_elem);
+
+  ASSERT (ppp != NULL);
+  ASSERT (ppp->pg != NULL);
+
+  struct frame * frame = ppp->pg->frame;
+
+  ASSERT (frame->page != NULL);
+  ASSERT (frame->page->status == PAGE_FRAME);
+  ASSERT (frame->page->owner == thread_current ());
+
+  frame->page->status = PAGE_FILE;
+  page_install_spte (frame->page);
+
+  frame_recycle (frame, 0);     // dont swap
+  list_remove (&frame->elem);   // remove from active_frames
+
+  palloc_free_page (frame->kernel_address);
+  free (frame);
+}
+
+/* Free all current thread's user frames when it exits */
 void frame_free_all ()
 {
   struct thread * cur = thread_current ();
@@ -184,25 +208,7 @@ void frame_free_all ()
   lock_acquire (&frames_lock);
   lock_acquire (&cur->vm_lock);
 
-  ASSERT (cur->active_pages == (int) list_size (&cur->user_frames));
-
-  while (!list_empty (&cur->user_frames))
-    {
-      struct frame * frame = list_entry (list_pop_front (&cur->user_frames), struct frame, thr_elem);
-      
-      ASSERT (frame->page != NULL);
-      ASSERT (frame->page->status == PAGE_FRAME);
-      ASSERT (frame->page->owner == cur);
-
-      frame->page->status = PAGE_FILE;
-      page_install_spte (frame->page);
-
-      frame_recycle (frame, 0);     // dont swap
-      list_remove (&frame->elem);   // remove from active_frames
-
-      palloc_free_page (frame->kernel_address);
-      free (frame);
-    }
+  hash_apply (&cur->pte_page_mapping, free_a_frame);
 
   lock_release (&cur->vm_lock);
   lock_release (&frames_lock);

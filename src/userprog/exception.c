@@ -157,14 +157,32 @@ page_fault (struct intr_frame *f)
   // page fault shouldn't happend in kernel threads.
   ASSERT (thread_current ()->pagedir != NULL); 
 
+  // printf ("Page fault %s %x\n", thread_current ()->name, fault_addr);
   if (not_present == false)  // writing read only page
     kill (f);
   
   if (is_kernel_vaddr (fault_addr)) // accessing kernel pages
     kill (f);
 
+  
+  // if (fault_addr >= PHYS_BASE - THREAD_MAX_STACK_LEN /* In stack area */
+  //     && !pagedir_has_mapping (thread_current ()->pagedir,  fault_addr))
+  //   {
+  //     thread_makesure_stack (fault_addr);
+
+  //     // stack growth
+  //     printf ("Stack growth %s %x\n", thread_current ()->name, fault_addr);
+  //     struct page * pg = page_alloc_init ( (void *) ((uint8_t *) pg_round_down (fault_addr)), 
+  //       NULL, 0, 0, 1 );
+  //     page_install_spte ( pg );
+  //   }
+
   if (page_load (pg_round_down (fault_addr), 0 /* dont pin */) == false)
-    // page load fail
+    {
+      // page load fail
+      // printf ("Bad page fault %s %x\n", thread_current ()->name, fault_addr);
       thread_exit ();
+    }
+  // printf ("Page fault finished %s %x\n", thread_current ()->name, fault_addr);
 }
 

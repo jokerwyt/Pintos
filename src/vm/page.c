@@ -5,6 +5,7 @@
 #include "threads/malloc.h"
 #include "frame.h"
 #include "threads/pte.h"
+#include "lib/kernel/hash.h"
 
 // malloc struct page for the current thread and initialize it.
 struct page * 
@@ -69,8 +70,23 @@ static void load_into_frame (struct page * pg, struct frame * f)
 
   pg->frame = f;
   pg->status = PAGE_FRAME;
-  
-  list_push_back (&pg->owner->user_frames, &f->thr_elem);
+}
+
+static struct pte_page_pair *
+malloc_pte_page_pair (uint32_t pte, struct page * pg)
+{
+  struct pte_page_pair * p = malloc(sizeof (struct pte_page_pair));
+  if (p)
+    {
+      p->pte = pte;
+      p->pg  = pg;
+    }
+  return p;
+}
+
+static uint32_t get_pte (struct page * pg)
+{
+  return pte_create_user ((void *)pg->frame->kernel_address, pg->writable);
 }
 
 /* look up supplemental page table and load a page */
@@ -97,6 +113,7 @@ bool page_load (void * upage, bool pin)
       return false;
 
   // pg won't change, because it's not shared.
+  bool success = 1;
   lock_acquire (&cur->vm_lock);
   {
 
@@ -105,25 +122,46 @@ bool page_load (void * upage, bool pin)
     load_into_frame (pg, frame);
 
     // install the frame into pagedir
-    *p_pte = pte_create_user ((void *)frame->kernel_address, pg->writable);
 
-    cur->active_pages ++;
+    struct pte_page_pair * ptr = malloc_pte_page_pair (get_pte ( pg ), pg);
+    if (ptr == NULL)
+      success = false;
+    else
+      {
+        // printf("insert pte %x pages %x\n", get_pte (pg), pg);
+        hash_insert (&cur->pte_page_mapping, &ptr->hash_elem);
+        *p_pte = get_pte ( pg );
+      }
   }
   lock_release (&cur->vm_lock);
 
-  frame_attach (frame);
-  // the frame can be evited from now on. (and pg begins to be shared)
+  if (success)  
+    frame_attach (frame);
+    // the frame can be evited from now on. (and pg begins to be shared)
 
-  return true;
+  return success;
+}
+
+// remove this page from the process pte-page mapping, and free the pte-page pair.
+static void remove_from_mapping (struct hash * mapping, struct page * pg)
+{
+  // printf ("remove pte %x pages %x\n", get_pte (pg), pg);
+  ASSERT ( lock_held_by_current_thread (&pg->owner->vm_lock) );
+  ASSERT (pg->frame != NULL);
+
+  struct pte_page_pair p;
+  p.pg = pg;
+  p.pte = get_pte (pg);
+  struct hash_elem * he = hash_delete (mapping, &p.hash_elem);
+  ASSERT (he != NULL);
+  struct pte_page_pair *ptr = hash_entry (he, struct pte_page_pair, hash_elem);
+  ASSERT (ptr != NULL);
+  free (ptr);
 }
 
 /* 
 Swap out a user page.
 pg's frame is not in active_frames now.
-
-steps:
-   1. remove the frame frorm user_frames
-   2. recycle the frame (into swap if needed)
 */
 struct frame * page_swap_out (struct page * pg)
 {
@@ -133,9 +171,6 @@ struct frame * page_swap_out (struct page * pg)
   struct frame * frame = pg->frame;
 
   ASSERT (frame != NULL);
-
-  // remove the frame from its owner's user_frames.
-  list_remove (&frame->thr_elem); 
 
   if (pg->writable == false || 
     (pg->load_from_file && pagedir_is_dirty (pg->owner->pagedir, pg->user_address) == 0))
@@ -149,6 +184,32 @@ struct frame * page_swap_out (struct page * pg)
       pg->swap_offset = frame_recycle (frame, 1);
       pg->status = PAGE_SWAP;
     }
+
+  remove_from_mapping (&pg->owner->pte_page_mapping, pg);
+
   pg->frame = NULL;
   return frame;
+}
+
+void pte_page_pair_destructor (struct hash_elem *p_, void *aux UNUSED)
+{
+  struct pte_page_pair *p = hash_entry (p_, struct pte_page_pair, hash_elem);
+  free (p);
+}
+
+unsigned
+pte_page_pair_hash (const struct hash_elem *p_, void *aux UNUSED)
+{
+  const struct pte_page_pair *p = hash_entry (p_, struct pte_page_pair, hash_elem);
+  return hash_int (p->pte);
+}
+
+bool
+pte_page_pair_less (const struct hash_elem *a_, const struct hash_elem *b_,
+           void *aux UNUSED)
+{
+  const struct pte_page_pair *a = hash_entry (a_, struct pte_page_pair, hash_elem);
+  const struct pte_page_pair *b = hash_entry (b_, struct pte_page_pair, hash_elem);
+
+  return a->pte < b->pte;
 }

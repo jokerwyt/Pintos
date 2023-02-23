@@ -20,6 +20,7 @@
 #include "threads/malloc.h"
 #include "vm/page.h"
 #include "vm/frame.h"
+#include "lib/kernel/hash.h"
 
 #define MAX_CMD_LINE_LEN (256)
 
@@ -203,9 +204,17 @@ start_process (void *file_name_)
   /* If load failed, quit. */
   if (!success) {
     palloc_free_page (file_name);
+    printf ("load fail\n");
     thread_exit ();
   }
 
+
+  /* Init frame pages mapping hash table */
+  struct thread * cur = thread_current ();
+  hash_init (&cur->pte_page_mapping, pte_page_pair_hash, pte_page_pair_less, NULL);
+
+  // page fault is possible when placing args
+  
   place__start_args (&if_.esp, file_name);
   palloc_free_page (file_name); 
 
@@ -260,6 +269,8 @@ process_wait (tid_t child_tid UNUSED)
 void
 process_exit (void)
 {
+  // debug_backtrace ();
+
   struct thread *cur = thread_current ();
   uint32_t *pd;
   int retval = 0;
@@ -342,6 +353,8 @@ process_exit (void)
          directory, or our active page directory will be one
          that's been freed (and cleared). */
       frame_free_all ();
+      hash_destroy (&cur->pte_page_mapping, pte_page_pair_destructor);
+
       cur->pagedir = NULL;
       pagedir_activate (NULL);
       pagedir_destroy (pd);
@@ -645,7 +658,10 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
       struct page * pg = page_alloc_init ( (void *) upage, 
           file, cur_ofs, page_read_bytes, writable );
       if (pg == NULL)
-        return false;
+        {
+          printf("allocate page fail\n");
+          return false;
+        }
 
       page_install_spte ( pg );
 
@@ -663,13 +679,20 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 static bool
 setup_stack (void **esp) 
 {
-  struct page * pg = page_alloc_init ( (void *) ((uint8_t *) PHYS_BASE - PGSIZE), 
-    NULL, 0, 0, 1 );
-  if (pg == NULL)
-    return false;
+  for (char * vaddr = PHYS_BASE - PGSIZE; 
+    vaddr >= (char *) (PHYS_BASE - 4096); vaddr -= PGSIZE)
+      {
+        struct page * pg = page_alloc_init ( (void *) vaddr, 
+          NULL, 0, 0, 1 );
+        if (pg == NULL)
+          {
+            printf ("stack page alloc fail\n");
+            return false;
+          }
+
+        page_install_spte ( pg );
+      }
 
   *esp = PHYS_BASE;
-  page_install_spte ( pg );
-
   return true;
 }

@@ -88,17 +88,17 @@ validate_uaddr_no_buffer (void * _uaddr, size_t len, bool need_writable)
 */
 static void
 validate_uaddr (void * _uaddr, size_t len, bool need_writable, 
-              void ** addr, int * pagecnt, bool copy)
+              void ** addr, bool copy)
 {
   validate_uaddr_no_buffer (_uaddr, len, need_writable);
 
   // validate ok. start to make a copy.
-  *pagecnt = (len + PGSIZE - 1) / PGSIZE;
-  if (*pagecnt == 0)
-    *pagecnt = 1;
-  *addr = palloc_get_multiple (0, *pagecnt);
-  if (*addr == NULL)
-    thread_exit (); // there is no enough space for palloc
+  *addr = malloc (len);
+  if (len > 0 && *addr == NULL)
+    {
+      printf ("strange exit\n");
+      thread_exit (); // there is no enough space for palloc
+    }
   if (copy)
     memcpy (*addr, _uaddr, len);
 }
@@ -107,7 +107,7 @@ validate_uaddr (void * _uaddr, size_t len, bool need_writable,
 /* Validate read only string. If invalid, call thread_exit ().
   Copy the data into continuous kernel page, return with ownership.
 */
-static void validate_str (const char * s, void ** addr, int * pagecnt)
+static void validate_str (const char * s, void ** addr)
 {
   const char * to_check = s;
   size_t len = 0;
@@ -125,8 +125,7 @@ static void validate_str (const char * s, void ** addr, int * pagecnt)
     }
 
   // validate ok. start to make a copy.
-  *pagecnt = (len + 1 + PGSIZE - 1) / PGSIZE;
-  *addr = palloc_get_multiple (0, *pagecnt);
+  *addr = malloc (len + 1);
   if (*addr == NULL)
     thread_exit (); // there is no enough space for palloc
   memcpy (*addr, origin_start, len + 1);
@@ -193,11 +192,10 @@ static void exec_handler (struct intr_frame *f)
 {
   const char * cmd_line = (const char *) ARG(f, 1);
   void * copy;
-  int pagecnt;
 
-  validate_str (cmd_line, &copy, &pagecnt);
+  validate_str (cmd_line, &copy);
   set_ret (f, process_execute ( (const char *) copy));
-  palloc_free_multiple (copy, pagecnt);
+  free (copy);
 }
 
 static void wait_handler (struct intr_frame *f)
@@ -212,46 +210,42 @@ static void create_handler (struct intr_frame *f)
   off_t size = ARG(f, 2);
   int ret = 0; 
   void * copy;
-  int pagecnt;
 
-  validate_str (name, &copy, &pagecnt);
+  validate_str (name, &copy);
 
   lock_acquire (&fslock);
   ret = filesys_create ( (const char *) copy, size);
   lock_release (&fslock);
   set_ret (f, ret);
 
-  palloc_free_multiple (copy, pagecnt);
+  free (copy);
 }
 
 static void remove_handler (struct intr_frame *f)
 {
   const char * name = (const char *) ARG (f, 1);
   void * copy;
-  int pagecnt;
 
-  validate_str (name, &copy, &pagecnt);
+  validate_str (name, &copy);
 
   lock_acquire (&fslock);
   set_ret (f, filesys_remove (name));
   lock_release (&fslock);
-  palloc_free_multiple (copy, pagecnt);
+  free (copy);
 }
 
 static void open_handler (struct intr_frame *f)
 {
   const char *name = (const char *) ARG (f, 1);
-  struct thread * cur = thread_current ();
   void * copy;
-  int pagecnt;
 
-  validate_str (name, &copy, &pagecnt);
+  validate_str (name, &copy);
 
   
   lock_acquire (&fslock);
   struct file * file = filesys_open (name);
   lock_release (&fslock);
-  palloc_free_multiple (copy, pagecnt);
+  free (copy);
 
   if (file == NULL)
     set_ret (f, -1); // unsuccessfully
@@ -259,11 +253,8 @@ static void open_handler (struct intr_frame *f)
     {
       struct proc_file * pf = malloc (sizeof (struct proc_file));
       pf->file = file;
-      pf->fd = cur->next_fd;
-      if (cur->next_fd == INT32_MAX)
-        cur->next_fd = MIN_FD;
-      else
-        cur->next_fd ++;
+      pf->fd = thread_fd_next ();
+
       list_push_front (&thread_current ()->opening_files, &pf->elem);
       set_ret (f, pf->fd);
     }
@@ -332,24 +323,25 @@ write_handler (struct intr_frame *f)
   const void *buffer = (const void *) ARG (f, 2);
   unsigned size = ARG (f, 3);
   void * copy;
-  int pagecnt;
 
 
   if (fd == STDOUT_FILENO)
     {
-      validate_uaddr ( (void *) buffer, size, READ, &copy, &pagecnt, COPY);
+      validate_uaddr ( (void *) buffer, size, READ, &copy, COPY );
       putbuf(copy, size);
+      free (copy);
     }
   else 
     {
       struct list_elem * elem = validate_fd (fd);
-      validate_uaddr ( (void *) buffer, size, READ, &copy, &pagecnt, COPY);
+      validate_uaddr ( (void *) buffer, size, READ, &copy, COPY);
       struct proc_file * pf = list_entry (elem, struct proc_file, elem);
 
       lock_acquire (&fslock);
-      set_ret (f, file_write (pf->file, buffer, size));
+      set_ret (f, file_write (pf->file, copy, size));
       lock_release (&fslock);
-      palloc_free_multiple (copy, pagecnt);
+
+      free (copy);
     }
 }
 
@@ -375,15 +367,14 @@ read_handler (struct intr_frame *f)
 
       
       void *copy;
-      int pagecnt;
-      validate_uaddr ( (void *) buffer, size, WRITE, &copy, &pagecnt, DONT_COPY);
+      validate_uaddr ( (void *) buffer, size, WRITE, &copy, DONT_COPY);
       
       lock_acquire (&fslock);
       set_ret (f, file_read (pf->file, copy, size));
       lock_release (&fslock);
 
       memcpy (buffer, copy, size);
-      palloc_free_multiple (copy, pagecnt);
+      free (copy);
     }
 }
 
@@ -471,7 +462,16 @@ syscall_handler (struct intr_frame *f)
     case SYS_TELL:
       tell_handler (f);
       break;
+    
+    case SYS_MMAP:
+      printf ("unhandled mmap syscall");
+      thread_exit ();
+      break;
 
+    case SYS_MUNMAP:
+      printf ("unhandled unmmap syscall");
+      thread_exit ();
+      break;
 
     default:
       // unknown syscall

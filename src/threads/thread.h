@@ -5,6 +5,7 @@
 #include <list.h>
 #include <stdint.h>
 #include "synch.h"
+#include "lib/kernel/hash.h"
 
 /** States in a thread's life cycle. */
 enum thread_status
@@ -167,8 +168,7 @@ struct thread
     int next_fd;
 
     struct lock vm_lock;                /* VM lock */
-    struct list user_frames;            /* All frames in used by this threads */
-    int active_pages;                   /* Active user pages cnt */
+    struct hash pte_page_mapping;       /* map pte to struct page */
 
     /* Owned by thread.c. */
     unsigned magic;                     /**< Detects stack overflow. */
@@ -211,5 +211,10 @@ int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
+int thread_fd_next (void);
+
+void thread_extend_stack (uint32_t vaddr);
+
+#define THREAD_MAX_STACK_LEN (8 * 1024 * 1024) /* 8MB */
 
 #endif /**< threads/thread.h */
