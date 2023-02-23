@@ -170,6 +170,8 @@ struct thread
     struct lock vm_lock;                /* VM lock */
     struct hash paddr_page_mapping;       /* map pte to struct page */
 
+    void * latest_trap_esp;
+
     /* Owned by thread.c. */
     unsigned magic;                     /**< Detects stack overflow. */
   };

@@ -39,12 +39,25 @@ validate_page (uint32_t * pd, void * page, bool need_writable)
   lock_acquire (&thread_current ()->vm_lock);
 
   uint32_t * p_pte = pagedir_lookup_pte (pd, page, 0);
-
+  struct thread *cur = thread_current ();
   bool exit = 0;
 
   if (p_pte == NULL || *p_pte == 0)
-    // have no mapping
-    exit = 1;
+    {
+      // have no mapping
+      // implement stack growth
+      if (page >= pg_round_down (cur->latest_trap_esp)
+          /* In stack area */
+          && !pagedir_has_mapping (cur->pagedir,  page))
+        {
+          // stack growth
+          // printf ("Stack growth %s %x\n", thread_current ()->name, fault_addr);
+          struct page * pg = page_alloc_init ( page, NULL, 0, 0, 1 );
+          page_install_spte ( pg );
+        }
+      else
+        exit = 1;
+    }
   else if (need_writable)
     {
       // 2 cases: spte or pte

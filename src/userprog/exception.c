@@ -114,6 +114,7 @@ kill (struct intr_frame *f)
     }
 }
 
+#define ESP_ACCESS_OFFSET 32
 /** Page fault handler.  This is a skeleton that must be filled in
    to implement virtual memory.  Some solutions to project 2 may
    also require modifying this code.
@@ -129,6 +130,7 @@ static void
 page_fault (struct intr_frame *f) 
 {
   bool not_present;  /**< True: not-present page, false: writing r/o page. */
+  bool user;         /**< True: access by user, false: access by kernel. */
   void *fault_addr;  /**< Fault address. */
 
   /* Obtain faulting address, the virtual address that was
@@ -149,6 +151,11 @@ page_fault (struct intr_frame *f)
 
   /* Determine cause. */
   not_present = (f->error_code & PF_P) == 0;
+  user = (f->error_code & PF_U) != 0;
+
+  struct thread * cur = thread_current ();
+
+
 
   /* To implement virtual memory, delete the rest of the function
      body, and replace it with code that brings in the page to
@@ -164,23 +171,30 @@ page_fault (struct intr_frame *f)
   if (is_kernel_vaddr (fault_addr)) // accessing kernel pages
     kill (f);
 
+  if (user == true)
+    {
+      cur->latest_trap_esp = f->esp;
+      //stack size limit
+      if ( (uint32_t) PHYS_BASE - (uint32_t) cur->latest_trap_esp >= THREAD_MAX_STACK_LEN)
+        {
+          /* Stack overflow */
+          thread_exit ();
+        }
+    }
   
-  // if (fault_addr >= PHYS_BASE - THREAD_MAX_STACK_LEN /* In stack area */
-  //     && !pagedir_has_mapping (thread_current ()->pagedir,  fault_addr))
-  //   {
-  //     thread_makesure_stack (fault_addr);
-
-  //     // stack growth
-  //     printf ("Stack growth %s %x\n", thread_current ()->name, fault_addr);
-  //     struct page * pg = page_alloc_init ( (void *) ((uint8_t *) pg_round_down (fault_addr)), 
-  //       NULL, 0, 0, 1 );
-  //     page_install_spte ( pg );
-  //   }
+  if (fault_addr >= cur->latest_trap_esp - ESP_ACCESS_OFFSET /* In stack area */
+      && !pagedir_has_mapping (thread_current ()->pagedir,  fault_addr))
+    {
+      // stack growth
+      // printf ("Stack growth %s %x\n", thread_current ()->name, fault_addr);
+      struct page * pg = page_alloc_init ( pg_round_down (fault_addr), NULL, 0, 0, 1 );
+      page_install_spte ( pg );
+    }
 
   if (page_load (pg_round_down (fault_addr), 0 /* dont pin */) == false)
     {
       // page load fail
-      printf ("Bad page fault %s %x\n", thread_current ()->name, fault_addr);
+      // printf ("Bad page fault %s %x\n", thread_current ()->name, fault_addr);
       thread_exit ();
     }
   // printf ("Page fault finished %s %x\n", thread_current ()->name, fault_addr);
