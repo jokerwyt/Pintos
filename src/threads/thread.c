@@ -473,6 +473,7 @@ init_thread (struct thread *t, const char *name, int priority)
   t->next_fd = MIN_FD;
   list_init (&t->opening_files);
   list_init (&t->children_info);
+  list_init (&t->mmap_segments);
   lock_init (&t->vm_lock);
 
   old_level = intr_disable ();
@@ -600,22 +601,6 @@ int thread_fd_next ()
     cur->next_fd ++;
   return ret;
 }
-
-// void thread_extend_stack (uint32_t vaddr)
-// {
-//   if (PHYS_BASE > vaddr && vaddr >= PHYS_BASE - THREAD_MAX_STACK_LEN)
-//     {
-//       if (!pagedir_has_mapping (thread_current ()->pagedir,  fault_addr))
-//         {
-//           printf ("Stack growth %s %x\n", thread_current ()->name, fault_addr);
-//           struct page * pg = page_alloc_init ( (void *) ((uint8_t *) pg_round_down (fault_addr)), 
-//             NULL, 0, 0, 1 );
-//           page_install_spte ( pg );
-//         }
-//     }
-//   else // not a stack address
-//     ;
-// }
 
 
 /** Offset of `stack' member within `struct thread'.

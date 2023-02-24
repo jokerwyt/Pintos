@@ -52,8 +52,8 @@ validate_page (uint32_t * pd, void * page, bool need_writable)
         {
           // stack growth
           // printf ("Stack growth %s %x\n", thread_current ()->name, fault_addr);
-          struct page * pg = page_alloc_init ( page, NULL, 0, 0, 1 );
-          page_install_spte ( pg );
+          struct page * pg = page_alloc_init ( page, NULL, 0, 0, 1, NOT_MMAP_PAGE);
+          (void) page_install_spte ( pg );
         }
       else
         exit = 1;
@@ -444,6 +444,157 @@ tell_handler (struct intr_frame *f)
   lock_release (&fslock);
 }
 
+static bool 
+validate_user_given_mmap_addr (void * _addr, uint32_t len)
+{
+  if (_addr == 0 || pg_ofs (_addr) != 0) 
+    return false;
+  
+  char * addr = _addr;
+  char * end = addr + len;
+
+  addr = pg_round_down (addr);
+
+  struct thread * cur = thread_current ();
+  while (addr < end)
+    {
+      if (pagedir_has_mapping (cur->pagedir, addr))
+        return false;
+      addr += PGSIZE;
+    }
+  return true;
+}
+
+static void mmap_handler (struct intr_frame *f)
+{
+  int fd = ARG (f, 1);
+  void * addr = (void *) ARG (f, 2);
+  struct thread * curt = thread_current ();
+  struct file * file = list_entry (validate_fd (fd), struct proc_file, elem)->file;
+
+  lock_acquire (&curt->vm_lock);
+  lock_acquire (&fslock);
+    
+  uint32_t len = file_length (file);
+  if (len == 0 || !validate_user_given_mmap_addr (addr, len))
+    {
+      set_ret (f, -1);
+      lock_release (&fslock);
+      lock_release (&curt->vm_lock);
+      return;
+    }
+
+  file = file_reopen (file);
+  lock_release (&fslock);
+  
+  if (file == NULL)
+    {
+      set_ret (f, -1);
+      lock_release (&curt->vm_lock);
+      return;
+    }
+    
+  uint8_t * cur = addr;
+  uint32_t rest_len = len;
+  uint32_t ofs = 0;
+  
+  
+  struct proc_mmap_segment * ptr = malloc (sizeof (struct proc_mmap_segment));
+  if (ptr == NULL)
+    {
+      set_ret (f, -1);
+      lock_release (&curt->vm_lock);
+      
+      lock_acquire (&fslock);
+      file_close (file);
+      lock_release (&fslock);
+      
+      return;
+    }
+
+  while (rest_len > 0)
+    {
+      uint32_t put = rest_len > PGSIZE ? PGSIZE : rest_len;
+
+      struct page * pg = page_alloc_init (cur, file, ofs, put, 1, IS_MMAP_PAGE);
+      if (pg == NULL)
+        {
+          // fail. release all resource and return
+          set_ret (f, -1);
+
+          free (ptr);
+          lock_acquire (&fslock);
+          file_close (file);
+          lock_release (&fslock);
+          
+          // withdraw all modification to page table
+          uint8_t * t = addr;
+          while (t < cur)
+            {
+              ASSERT (pagedir_has_mapping (thread_current ()->pagedir, t));
+              uint32_t *p_pte = pagedir_lookup_pte (thread_current ()->pagedir, t, 0);
+              free ( (void *) *p_pte);
+              *p_pte = 0;
+            }
+          lock_release (&curt->vm_lock);
+          return;
+        }
+
+      (void) page_install_spte ( pg );
+
+      rest_len -= put;
+      ofs += put;
+      cur += PGSIZE;
+    }
+
+  mapid_t ret = thread_fd_next ();
+  ptr->fd = ret;
+  ptr->addr = addr;
+  ptr->len = len;
+
+  list_push_back (&thread_current ()->mmap_segments, &ptr->elem);
+  set_ret (f, ret);
+  lock_release (&curt->vm_lock);
+}
+
+static struct proc_mmap_segment * search_mmap_by_fd (mapid_t fd)
+{  
+  struct thread * cur = thread_current ();
+  struct list_elem * elem;
+
+  for (elem = list_begin (&cur->mmap_segments);
+       elem != list_end (&cur->mmap_segments);
+       elem = list_next (elem))
+    {
+      struct proc_mmap_segment * pf = list_entry
+        (elem, struct proc_mmap_segment, elem);
+      if (pf->fd == fd)
+          return pf;
+    }
+  return NULL;
+}
+
+static void unmmap_handler (struct intr_frame *f)
+{
+  mapid_t fd = (mapid_t) ARG (f, 1);
+  struct proc_mmap_segment * ptr = search_mmap_by_fd (fd);
+  if (ptr == NULL)
+    // bad mmap fd
+    thread_exit ();
+
+  // unmmap every single page
+  uint8_t * end = ptr->addr + ptr->len;
+  uint8_t * vaddr = pg_round_down ( ptr->addr );
+  while (vaddr < end)
+    {
+      frame_unmmap (vaddr);
+      vaddr += PGSIZE;
+    }
+  // remove struct mmap segment from the list and free it
+  list_remove (&ptr->elem);
+  free (ptr);
+}
+
 static void
 syscall_handler (struct intr_frame *f) 
 {
@@ -504,13 +655,11 @@ syscall_handler (struct intr_frame *f)
       break;
     
     case SYS_MMAP:
-      printf ("unhandled mmap syscall");
-      thread_exit ();
+      mmap_handler (f);
       break;
 
     case SYS_MUNMAP:
-      printf ("unhandled unmmap syscall");
-      thread_exit ();
+      unmmap_handler (f);
       break;
 
     default:

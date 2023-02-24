@@ -16,5 +16,6 @@ void pagedir_set_accessed (uint32_t *pd, const void *upage, bool accessed);
 void pagedir_activate (uint32_t *pd);
 uint32_t *pagedir_lookup_pte (uint32_t * pd, uint8_t * vaddr, bool create);
 bool pagedir_has_mapping (uint32_t * pd, void * vaddr);
+bool pagedir_is_spte (uint32_t * pd, void * vaddr);
 
 #endif /**< userprog/pagedir.h */

@@ -9,6 +9,8 @@
 #include "userprog/pagedir.h"
 #include "lib/string.h"
 #include "lib/kernel/hash.h"
+#include "threads/pte.h"
+#include "userprog/process.h"
 
 static struct list active_frames = LIST_INITIALIZER(active_frames);
 static struct lock frames_lock;
@@ -87,8 +89,9 @@ struct frame * frame_alloc ()
 
                 // remove the mapping, may cause page fault immediately
                 // but the pg->owner->vm_lock prevents data race.
-                (void) page_swap_out ( pg );
-                page_install_spte ( pg );
+                uint32_t pte = page_install_spte ( pg );
+
+                (void) page_swap_out ( pg, pte );
                 return_frame = hand;
               }
           }
@@ -176,7 +179,40 @@ off_t frame_recycle (struct frame * frame, bool swap)
     return -1;
 }
 
-static void free_a_frame (struct hash_elem * elem, void * aux UNUSED)
+/* 
+  Detach the frame
+  Writing to the backing file if necessary
+  Remove the frarme from active_frames list
+  Free the frame's page
+  Free the frame structure itself
+*/
+static void discard_its_frame (struct page * pg)
+{
+  struct frame * frame = pg->frame;
+
+  ASSERT (pg != NULL);
+  ASSERT (pg->status == PAGE_FRAME);
+  ASSERT (pg->owner == thread_current ());
+  ASSERT (lock_held_by_current_thread (&pg->owner->vm_lock));
+  ASSERT (lock_held_by_current_thread (&frames_lock));
+
+  uint32_t pte = page_install_spte (pg);
+  
+  if (pg->mmap_page)
+    {
+      if (pte_get_dirty (pte))
+        page_write_back_to_file ( pg );
+    }
+
+  pg->status = PAGE_FILE; 
+  frame_recycle (frame, 0);     // dont swap
+  list_remove (&frame->elem);   // remove from active_frames
+
+  palloc_free_page (frame->kernel_address);
+  free (frame);
+}
+
+static void hash_proxy_discard_its_frame (struct hash_elem * elem, void * aux UNUSED)
 {
   struct paddr_page_pair * ppp = 
     hash_entry (elem, struct paddr_page_pair, hash_elem);
@@ -184,20 +220,7 @@ static void free_a_frame (struct hash_elem * elem, void * aux UNUSED)
   ASSERT (ppp != NULL);
   ASSERT (ppp->pg != NULL);
 
-  struct frame * frame = ppp->pg->frame;
-
-  ASSERT (frame->page != NULL);
-  ASSERT (frame->page->status == PAGE_FRAME);
-  ASSERT (frame->page->owner == thread_current ());
-
-  frame->page->status = PAGE_FILE;
-  page_install_spte (frame->page);
-
-  frame_recycle (frame, 0);     // dont swap
-  list_remove (&frame->elem);   // remove from active_frames
-
-  palloc_free_page (frame->kernel_address);
-  free (frame);
+  discard_its_frame (ppp->pg);
 }
 
 /* Free all current thread's user frames when it exits */
@@ -208,7 +231,47 @@ void frame_free_all ()
   lock_acquire (&frames_lock);
   lock_acquire (&cur->vm_lock);
 
-  hash_apply (&cur->paddr_page_mapping, free_a_frame);
+  hash_apply (&cur->paddr_page_mapping, hash_proxy_discard_its_frame);
+
+  lock_release (&cur->vm_lock);
+  lock_release (&frames_lock);
+}
+
+/* unmmap this page
+   If loaded, sweep back the frame.
+   Remove the mapping and recycle resoucce.
+
+
+   This function is placed in frame.c rather than page.c,
+   because of locking order required by the twisty design.
+*/
+void frame_unmmap (void * vaddr)
+{
+  struct thread * cur = thread_current ();
+
+  lock_acquire (&frames_lock);
+  lock_acquire (&cur->vm_lock);
+
+  uint32_t * p_pte = pagedir_lookup_pte (cur->pagedir, vaddr, 0);
+  ASSERT (p_pte != NULL && *p_pte != 0);
+
+  uint32_t pte = *p_pte;
+  struct page * pg;
+  if ( pte_present (pte) )
+    {
+      // loaded case: destory the frame
+      pg = process_pte_to_page (pte);
+      ASSERT (pg != NULL);
+
+      page_remove_from_mapping (&cur->paddr_page_mapping, pg);
+      discard_its_frame (pg);
+      pg->frame = NULL;
+    }
+  else
+    pg = (struct page *) pte;
+
+  *p_pte = 0;
+  free (pg);
 
   lock_release (&cur->vm_lock);
   lock_release (&frames_lock);

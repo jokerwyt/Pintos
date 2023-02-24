@@ -300,3 +300,13 @@ bool pagedir_has_mapping (uint32_t * pd, void * vaddr)
   else  // there is a pte or a spte.
     return true;
 }
+
+bool pagedir_is_spte (uint32_t * pd, void * vaddr)
+{
+  // printf("has mapping query %x\n", vaddr);
+  uint32_t *p_pte = pagedir_lookup_pte (pd, vaddr, 0);
+  if (p_pte == NULL || *p_pte == 0)
+    return false;
+  else  // there is a pte or a spte.
+    return !pte_present (*p_pte);
+}

@@ -187,8 +187,8 @@ page_fault (struct intr_frame *f)
     {
       // stack growth
       // printf ("Stack growth %s %x\n", thread_current ()->name, fault_addr);
-      struct page * pg = page_alloc_init ( pg_round_down (fault_addr), NULL, 0, 0, 1 );
-      page_install_spte ( pg );
+      struct page * pg = page_alloc_init ( pg_round_down (fault_addr), NULL, 0, 0, 1, NOT_MMAP_PAGE);
+      (void) page_install_spte ( pg );
     }
 
   if (page_load (pg_round_down (fault_addr), 0 /* dont pin */) == false)

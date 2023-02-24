@@ -355,6 +355,10 @@ process_exit (void)
          that's been freed (and cleared). */
       frame_free_all ();
       hash_destroy (&cur->paddr_page_mapping, paddr_page_pair_destructor);
+      while (!list_empty (&cur->mmap_segments))
+        {
+          free (list_entry (list_pop_back (&cur->mmap_segments), struct proc_mmap_segment, elem));
+        }
 
       cur->pagedir = NULL;
       pagedir_activate (NULL);
@@ -657,14 +661,14 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
       size_t page_zero_bytes = PGSIZE - page_read_bytes;
 
       struct page * pg = page_alloc_init ( (void *) upage, 
-          file, cur_ofs, page_read_bytes, writable );
+          file, cur_ofs, page_read_bytes, writable, NOT_MMAP_PAGE);
       if (pg == NULL)
         {
           printf("allocate page fail\n");
           return false;
         }
 
-      page_install_spte ( pg );
+      (void) page_install_spte ( pg );
 
       /* Advance. */
       cur_ofs += page_read_bytes;
@@ -680,20 +684,15 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 static bool
 setup_stack (void **esp) 
 {
-  for (char * vaddr = PHYS_BASE - PGSIZE; 
-    vaddr >= (char *) (PHYS_BASE - 4096); vaddr -= PGSIZE)
-      {
-        struct page * pg = page_alloc_init ( (void *) vaddr, 
-          NULL, 0, 0, 1 );
-        if (pg == NULL)
-          {
-            printf ("stack page alloc fail\n");
-            return false;
-          }
-
-        page_install_spte ( pg );
-      }
-
+  struct page * pg = 
+    page_alloc_init ( (void *) ( (uint32_t)PHYS_BASE - PGSIZE), NULL, 
+            0, 0, 1, NOT_MMAP_PAGE);
+  if (pg == NULL)
+    {
+      printf ("stack page alloc fail\n");
+      return false;
+    }
+  (void) page_install_spte ( pg );
   *esp = PHYS_BASE;
   return true;
 }
@@ -702,11 +701,14 @@ setup_stack (void **esp)
 
 struct page * process_pte_to_page (uint32_t pte)
 {
+  ASSERT ( lock_held_by_current_thread (&thread_current ()->vm_lock) );
   struct paddr_page_pair p;
   p.paddr = pte_get_page (pte);
   // printf ("query paddr %x\n", p.paddr);
   struct hash_elem * he = hash_find (&thread_current ()->paddr_page_mapping, &p.hash_elem);
   if (he == NULL) 
     return NULL;
-  return hash_entry (he, struct paddr_page_pair, hash_elem)->pg;
+  struct page * pg = hash_entry (he, struct paddr_page_pair, hash_elem)->pg;
+  ASSERT (pg->status == PAGE_FRAME);
+  return pg;
 }

@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include "synch.h"
 #include "lib/kernel/hash.h"
+#include "vm/page.h"
 
 /** States in a thread's life cycle. */
 enum thread_status
@@ -89,6 +90,15 @@ struct proc_file
   struct list_elem elem;
 };
 
+struct proc_mmap_segment
+{
+  void * addr;
+  int len;
+  int fd;
+
+  struct list_elem elem;
+};
+
 /** A kernel thread or user process.
 
    Each thread structure is stored in its own 4 kB page.  The
@@ -167,10 +177,12 @@ struct thread
     struct list opening_files;
     int next_fd;
 
-    struct lock vm_lock;                /* VM lock */
+    struct lock vm_lock;                  /* VM lock */
     struct hash paddr_page_mapping;       /* map pte to struct page */
 
     void * latest_trap_esp;
+
+    struct list mmap_segments;
 
     /* Owned by thread.c. */
     unsigned magic;                     /**< Detects stack overflow. */
@@ -214,8 +226,6 @@ void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
 int thread_fd_next (void);
-
-void thread_extend_stack (uint32_t vaddr);
 
 #define THREAD_MAX_STACK_LEN (8 * 1024 * 1024) /* 8MB */
 

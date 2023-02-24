@@ -29,4 +29,6 @@ void frame_load_page (struct frame *, struct page *);
 off_t frame_recycle (struct frame *, bool swap);
 
 void frame_free_all (void);
+
+void frame_unmmap (void * addr);
 #endif

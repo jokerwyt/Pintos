@@ -43,14 +43,17 @@ struct page
     struct file_segment file_seg; // the file location
     off_t swap_offset;            // the swap location (if swap out)
     struct frame * frame;         // the frame pointer (if cached in memory)
+    bool mmap_page;               // is it mmap page ?
   };
 
 
-void page_install_spte (struct page * page);
+uint32_t page_install_spte (struct page * page);
 
+#define NOT_MMAP_PAGE 0
+#define IS_MMAP_PAGE 1
 struct page * 
 page_alloc_init (void * uaddr, struct file * file, 
-            off_t ofs, uint32_t len, bool writable);
+            off_t ofs, uint32_t len, bool writable, bool mmap);
 
 #define PIN 1
 #define DONT_PIN 0
@@ -58,7 +61,7 @@ bool page_load (void * upage, bool pin);
 
 void page_free (struct page * pg);
 
-struct frame * page_swap_out (struct page * pg);
+struct frame * page_swap_out (struct page * pg, uint32_t old_pte);
 
 
 struct paddr_page_pair
@@ -77,5 +80,9 @@ paddr_page_pair_less (const struct hash_elem *a_, const struct hash_elem *b_,
 
 void paddr_page_pair_destructor (struct hash_elem *p_, void *aux);
 
+
+void page_write_back_to_file ( struct page * pg );
+
+void page_remove_from_mapping (struct hash * mapping, struct page * pg);
 
 #endif
