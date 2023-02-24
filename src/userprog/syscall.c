@@ -51,7 +51,6 @@ validate_page (uint32_t * pd, void * page, bool need_writable)
           && !pagedir_has_mapping (cur->pagedir,  page))
         {
           // stack growth
-          // printf ("Stack growth %s %x\n", thread_current ()->name, fault_addr);
           struct page * pg = page_alloc_init ( page, NULL, 0, 0, 1, NOT_MMAP_PAGE);
           (void) page_install_spte ( pg );
         }

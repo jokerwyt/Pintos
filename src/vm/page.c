@@ -146,7 +146,6 @@ bool page_load (void * upage, bool pin)
         success = false;
     else
       {
-        // printf("insert paddr %x,  pages %x\n", get_paddr (pg), pg);
         hash_insert (&cur->paddr_page_mapping, &ptr->hash_elem);
         *p_pte = get_pte ( pg );
       }
@@ -163,14 +162,12 @@ bool page_load (void * upage, bool pin)
 // remove this page from the process paddr-page mapping, and free the paddr-page pair.
 void page_remove_from_mapping (struct hash * mapping, struct page * pg)
 {
-  // printf ("remove pte %x pages %x\n", get_pte (pg), pg);
   ASSERT ( lock_held_by_current_thread (&pg->owner->vm_lock) );
   ASSERT (pg->frame != NULL);
 
   struct paddr_page_pair p;
   p.pg = pg;
   p.paddr = get_paddr (pg);
-  // printf ("remove paddr %x\n", p.paddr);
   struct hash_elem * he = hash_delete (mapping, &p.hash_elem);
   ASSERT (he != NULL);
   struct paddr_page_pair *ptr = hash_entry (he, struct paddr_page_pair, hash_elem);

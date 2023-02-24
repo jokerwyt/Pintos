@@ -205,7 +205,6 @@ start_process (void *file_name_)
   /* If load failed, quit. */
   if (!success) {
     palloc_free_page (file_name);
-    // printf ("load fail\n");
     thread_exit ();
   }
 
@@ -270,8 +269,6 @@ process_wait (tid_t child_tid UNUSED)
 void
 process_exit (void)
 {
-  // debug_backtrace ();
-
   struct thread *cur = thread_current ();
   uint32_t *pd;
   int retval = 0;
@@ -664,7 +661,6 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
           file, cur_ofs, page_read_bytes, writable, NOT_MMAP_PAGE);
       if (pg == NULL)
         {
-          printf("allocate page fail\n");
           return false;
         }
 
@@ -689,7 +685,6 @@ setup_stack (void **esp)
             0, 0, 1, NOT_MMAP_PAGE);
   if (pg == NULL)
     {
-      printf ("stack page alloc fail\n");
       return false;
     }
   (void) page_install_spte ( pg );
@@ -704,7 +699,6 @@ struct page * process_pte_to_page (uint32_t pte)
   ASSERT ( lock_held_by_current_thread (&thread_current ()->vm_lock) );
   struct paddr_page_pair p;
   p.paddr = pte_get_page (pte);
-  // printf ("query paddr %x\n", p.paddr);
   struct hash_elem * he = hash_find (&thread_current ()->paddr_page_mapping, &p.hash_elem);
   if (he == NULL) 
     return NULL;

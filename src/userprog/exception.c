@@ -164,7 +164,6 @@ page_fault (struct intr_frame *f)
   // page fault shouldn't happend in kernel threads.
   ASSERT (thread_current ()->pagedir != NULL); 
 
-  // printf ("Page fault %s %x\n", thread_current ()->name, fault_addr);
   if (not_present == false)  // writing read only page
     kill (f);
   
@@ -186,7 +185,6 @@ page_fault (struct intr_frame *f)
       && !pagedir_has_mapping (thread_current ()->pagedir,  fault_addr))
     {
       // stack growth
-      // printf ("Stack growth %s %x\n", thread_current ()->name, fault_addr);
       struct page * pg = page_alloc_init ( pg_round_down (fault_addr), NULL, 0, 0, 1, NOT_MMAP_PAGE);
       (void) page_install_spte ( pg );
     }
@@ -194,9 +192,7 @@ page_fault (struct intr_frame *f)
   if (page_load (pg_round_down (fault_addr), 0 /* dont pin */) == false)
     {
       // page load fail
-      // printf ("Bad page fault %s %x\n", thread_current ()->name, fault_addr);
       thread_exit ();
     }
-  // printf ("Page fault finished %s %x\n", thread_current ()->name, fault_addr);
 }
 
