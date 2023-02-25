@@ -24,9 +24,8 @@
 // thread.h
 struct thread
   {
-    struct lock vm_lock;                /* VM lock (per thread) */
-    struct list user_frames;            /* All frames in used by this threads */
-    int active_pages;                   /* Active user pages cnt */    
+    struct lock vm_lock;                /* VM lock (per thread) */    
+    struct hash paddr_page_mapping;       /* map pte to struct page */
   }
 
 // page.h
@@ -68,14 +67,22 @@ struct page
     struct frame * frame;         // the frame pointer (if cached in memory)
   };
 
+// use in the hash table to implement physical-to-virtual mapping
+struct paddr_page_pair
+  {
+    struct hash_elem hash_elem;
+    void * paddr;
+    struct page * pg;
+  };
+
+
 // frame.h
 struct frame
   {
     struct page * page;     // the page it's now caching, NULL if available
-    bool pin;               // limit evict
+    bool pin;               // limit eviction
     void *kernel_address;   // greater than 3G
 
-    struct list_elem thr_elem; // list thr_frames
     struct list_elem elem; // list active_frames
   };
 
@@ -110,17 +117,15 @@ static struct list free_slots = LIST_INITIALIZER (free_slots); // restore all fr
 >A2: In a few paragraphs, describe your code for accessing the data
 >stored in the SPT about a given page.
 
-1. Putting the pointer to SPT in the PTE's 31 free bits allows the OS to get SPT when page faults happen. 
-2. When loading a page, fetch the SPT's pointer from PTE, and set PTE to the physical address. 
-3. When swapping it out, put the SPT's pointer back into PTE.
-
-
+1. Putting the pointer to the SPT entry in the PTE's 31 free bits allows the OS to get the SPT entry when page faults happen. 
+2. When loading a page, fetch the SPT entry's pointer from PTE, and set PTE to the physical address. 
+3. When swapping it out, put the SPT entry's pointer back into PTE.
 
 >A3: How does your code coordinate accessed and dirty bits between
 >kernel and user virtual addresses that alias a single frame, or
 >alternatively how do you avoid the issue?
 
-Kernel accesses user pages only when the process makes a syscall. These bits are used to make frame eviction decisions and do swap optimization. So the kernel only accesses user pages when syscalls happen for necessary data exchange. When loading pages or swapping them out, the kernel always used kernel virtual addresses.
+Kernel accesses user pages only when the process makes a syscall. These bits are used to assemble frame eviction decisions and do swap optimization. So the kernel only accesses user pages when syscalls happen for necessary data exchange. When loading pages or swapping them out, the kernel always used kernel virtual addresses.
 
 
 
@@ -129,18 +134,18 @@ Kernel accesses user pages only when the process makes a syscall. These bits are
 >A4: When two user processes both need a new frame at the same time,
 >how are races avoided?
 
-Synchronization is needed when eviction happens. Locking the active frames list when finding a frame to evict avoids races.
 
 
+In my implementation, synchronization is only needed when eviction happens. Locking the global active frames list when finding a frame to evict avoids races.
 
 #### RATIONALE
 
 >A5: Why did you choose the data structure(s) that you did for
 >representing virtual-to-physical mappings?
 
-1. Space benefits. Putting SPT's pointer into the page directory reduces unnecessary addressing memory costs and improves the cache locality to speed up the page fault handler.
-2. Time complexity benefits. There is almost no extra overhead to do demand paging. It is an O(1) implementation, except for the clock algorithm for frame eviction.
-3. Modularization. Dividing The VM system into page, frame, and swap provides better code readability and maintainability.
+I use SPT entries to map virtual addresses to physical addresses, which is trivial. I use a hash table to map inversely. The hash table provides a fast query but a slow modification, which fits our case. The kernel often needs to query but only modify the mapping when pages load in or swap out, which rarely happens. So adopting the hash table improves the performance.
+
+
 
 ## Paging To And From Disk
 
@@ -148,7 +153,7 @@ Synchronization is needed when eviction happens. Locking the active frames list 
 
 >B1: Copy here the declaration of each new or changed struct or struct member, global or static variable, typedef, or enumeration.  Identify the purpose of each in 25 words or less.
 
-see previous one.
+See the previous one.
 
 
 
@@ -165,7 +170,9 @@ The kernel acquires mutex access to the active frames list, which contains at le
 >process Q, how do you adjust the page table (and any other data
 >structures) to reflect the frame Q no longer has?
 
-The kernel will acquire process Q's VM lock first and then modify Q's pagedir to detach the page. After that, the kernel will modify the struct page's data to inform process Q that this page has been evicted. After detaching the frame from Q, the kernel releases Q's VM lock, acquires P's VM lock, loads the page's content into the frame, and modifies Q's struct page and the PTE.
+The kernel will acquire process Q's VM lock first and then modify Q's pagedir to detach the page. After that, the kernel will modify the struct page's data to inform process Q that this page has been evicted. And then, the kernel releases Q's VM lock, acquires P's VM lock, loads the page's content into the frame, and modifies P's struct page and the PTE.
+
+
 
 #### SYNCHRONIZATION
 
@@ -186,9 +193,7 @@ The process can only hold one VM lock at the same time. So circular wait will ne
 >the page during the eviction process?  How do you avoid a race
 >between P evicting Q's frame and Q faulting the page back in?
 
-
-
-P will acquire Q's VM lock first and install an SPT pointer to Q's PTE. After that, A page fault may be triggered by any access to this page from Q, but it will block until it gains its VM lock, before which P will complete the eviction process and release Q's VM lock.
+P will acquire Q's VM lock first and install an SPT pointer to Q's PTE, preventing Q from accessing this page. After that, A page fault may be triggered by any access to this page from Q, but it will block until it gains its VM lock, before which P will complete the eviction process and release Q's VM lock, which allows Q to fault the page back.
 
 
 
@@ -209,9 +214,15 @@ Adding the frame to the global active frame list enables it to be evicted. Doing
 
 
 
-This problem's key point is that page faults should not happen when the file system locks. I use page faults to bring in pages, allocate a temporary kernel page buffer to store data during file system operation, and then copy the data into user pages (or read data from user pages into the buffer in advance). I don't have a "locking" frame mechanism. This design does not affect the validation process of user-given virtual addresses.
+This problem's key point is that page faults should not happen when the file system locks. 
 
+- I use page fault to bring in pages.
 
+- I have a pinning mechanism for locking frames. 
+- When handling syscalls, I first fault all the pages needed in and pin them atomically.
+- At the end of syscalls, unpin all the pages.
+
+Invalid virtual addresses don't need special handling in my implementation. Just validating them as before is ok.
 
 #### RATIONALE
 
