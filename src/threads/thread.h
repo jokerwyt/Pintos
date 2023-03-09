@@ -95,6 +95,7 @@ struct proc_mmap_segment
   void * addr;
   int len;
   int fd;
+  struct file * backend_file;
 
   struct list_elem elem;
 };

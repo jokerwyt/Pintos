@@ -482,7 +482,6 @@ static void mmap_handler (struct intr_frame *f)
       lock_release (&curt->vm_lock);
       return;
     }
-
   file = file_reopen (file);
   lock_release (&fslock);
   
@@ -550,6 +549,7 @@ static void mmap_handler (struct intr_frame *f)
   ptr->fd = ret;
   ptr->addr = addr;
   ptr->len = len;
+  ptr->backend_file = file;
 
   list_push_back (&thread_current ()->mmap_segments, &ptr->elem);
   set_ret (f, ret);
@@ -591,6 +591,9 @@ static void unmmap_handler (struct intr_frame *f)
     }
   // remove struct mmap segment from the list and free it
   list_remove (&ptr->elem);
+  lock_acquire (&fslock);
+  file_close (ptr->backend_file);
+  lock_release (&fslock);
   free (ptr);
 }
 

@@ -280,33 +280,6 @@ process_exit (void)
   if (space != NULL)
     * space = '\0';
 
-    
-  // Exit status mechanism
-  // See details at the block comment of struct exit_status.
-  if (cur->exit_info)  // Except init thread, every thread should have this member
-    {
-      struct exit_status * es = cur->exit_info;
-      lock_acquire (&es->mutex);
-
-      /* Figure out the return value first */
-      es->child_exited = 1;
-      if (!es->active_exited)
-        es->exit_value = -1;
-      retval = es->exit_value;
-
-      // Print must be before signal the parent.
-      printf ("%s: exit(%d)\n", thread_name, retval);
-
-
-      if (es->parent_exited)
-        free (es);
-      else 
-        {
-          cond_signal (&es->cond, &es->mutex);
-          lock_release (&es->mutex);
-        }
-    }
-
   // Clean up the children list, but don't wait.
   // See details at the block comment of struct exit_status.
   while (!list_empty (&cur->children_info))
@@ -337,7 +310,6 @@ process_exit (void)
 
       free(pf);
     }
-
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
   pd = cur->pagedir;
@@ -352,14 +324,46 @@ process_exit (void)
          that's been freed (and cleared). */
       frame_free_all ();
       hash_destroy (&cur->paddr_page_mapping, paddr_page_pair_destructor);
+      lock_acquire (&fslock);
       while (!list_empty (&cur->mmap_segments))
         {
-          free (list_entry (list_pop_back (&cur->mmap_segments), struct proc_mmap_segment, elem));
+          struct proc_mmap_segment * seg = list_entry 
+            (list_pop_back (&cur->mmap_segments), struct proc_mmap_segment, elem);
+          file_close (seg->backend_file);
+          free (seg);
         }
+      lock_release (&fslock);
 
       cur->pagedir = NULL;
       pagedir_activate (NULL);
       pagedir_destroy (pd);
+    }
+
+
+  // Exit status mechanism
+  // See details at the block comment of struct exit_status.
+  if (cur->exit_info)  // Except init thread, every thread should have this member
+    {
+      struct exit_status * es = cur->exit_info;
+      lock_acquire (&es->mutex);
+
+      /* Figure out the return value first */
+      es->child_exited = 1;
+      if (!es->active_exited)
+        es->exit_value = -1;
+      retval = es->exit_value;
+
+      // Print must be before signal the parent.
+      printf ("%s: exit(%d)\n", thread_name, retval);
+
+
+      if (es->parent_exited)
+        free (es);
+      else 
+        {
+          cond_signal (&es->cond, &es->mutex);
+          lock_release (&es->mutex);
+        }
     }
 }
 
@@ -564,16 +568,19 @@ load (const char *file_name, void (**eip) (void), void **esp)
 
  done:
   /* We arrive here whether the load is successful or not. */
-  lock_release (&fslock);
   if (success)
     {
+      lock_release (&fslock);
       struct proc_file * pf = malloc (sizeof (struct proc_file));
       pf->fd = -1; // make it a invalid fd
       pf->file = file;
       list_push_back (&thread_current ()->opening_files, &pf->elem);
     }
   else
-    file_close (file);
+    {
+      file_close (file);
+      lock_release (&fslock);
+    }
   return success;
 }
 

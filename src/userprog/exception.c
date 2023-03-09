@@ -186,6 +186,9 @@ page_fault (struct intr_frame *f)
     {
       // stack growth
       struct page * pg = page_alloc_init ( pg_round_down (fault_addr), NULL, 0, 0, 1, NOT_MMAP_PAGE);
+      if (pg == NULL)
+        thread_exit ();
+        
       (void) page_install_spte ( pg );
     }
 
